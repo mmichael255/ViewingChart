@@ -8,6 +8,16 @@ class StockService:
         """
         try:
             # yfinance expects symbols like 'AAPL', '0700.HK', '600519.SS'
+            # Auto-select period based on interval to avoid Yahoo limits
+            if interval == "1m":
+                period = "7d"
+            elif interval in ["2m", "5m", "15m", "30m", "90m"]:
+                period = "59d" # 60d is the limit, use 59 to be safe
+            elif interval in ["60m", "1h"]:
+                period = "730d" # 2 years
+            else:
+                period = "max" # 1d, 1wk, 1mo use max available
+
             ticker = yf.Ticker(symbol)
             history = ticker.history(period=period, interval=interval)
             
