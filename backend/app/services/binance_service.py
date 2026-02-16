@@ -13,10 +13,25 @@ class BinanceService:
         # Ensure symbol is uppercase
         symbol = symbol.upper()
         
+        # Map user intervals to Binance supported intervals
+        # Supported: 1s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+        interval_map = {
+            "60m": "1h",
+            "90m": "1h", # Fallback
+            "2m": "1m",  # Fallback
+            "5d": "1w",  # Fallback
+            "1wk": "1w",
+            "1mo": "1M",
+            "3mo": "1M", # Fallback
+        }
+        
+        # Use mapped interval if exists, else use original (assuming it's valid or close enough)
+        binance_interval = interval_map.get(interval, interval)
+        
         url = f"{self.BASE_URL}/klines"
         params = {
             "symbol": symbol,
-            "interval": interval,
+            "interval": binance_interval,
             "limit": limit
         }
         
