@@ -6,7 +6,6 @@ import React, { useEffect, useRef, useState } from 'react';
 interface ChartComponentProps {
     data: CandlestickData<Time>[];
     volumeData?: HistogramData<Time>[];
-    symbol?: string; // Track symbol changes to reset zoom
     colors?: {
         backgroundColor?: string;
         lineColor?: string;
@@ -16,10 +15,9 @@ interface ChartComponentProps {
     };
 }
 
-export const ChartComponent: React.FC<ChartComponentProps> = ({ 
-    data, 
+export const ChartComponent: React.FC<ChartComponentProps> = ({
+    data,
     volumeData,
-    symbol,
     colors = {
         backgroundColor: '#1E222D', // TradingView Dark
         lineColor: '#2962FF',
@@ -111,28 +109,13 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
             }
         }
         if (volumeSeriesRef.current && volumeData) {
-             volumeSeriesRef.current.setData(volumeData);
+            volumeSeriesRef.current.setData(volumeData);
         }
     }, [data, volumeData]);
 
-    // 3. Reset Zoom when symbol changes
-    useEffect(() => {
-        if (chartRef.current && symbol) {
-            // Reset time scale zoom
-            chartRef.current.timeScale().fitContent();
-            
-            // Reset price scale zoom for both candlestick and volume
-            if (candlestickSeriesRef.current) {
-                chartRef.current.priceScale('right').applyOptions({
-                    autoScale: true
-                });
-            }
-        }
-    }, [symbol]);
-
     return (
-        <div 
-            ref={chartContainerRef} 
+        <div
+            ref={chartContainerRef}
             className="w-full h-[500px] relative"
         />
     );
