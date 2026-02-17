@@ -27,7 +27,7 @@ export default function Home() {
   };
 
   const CRYPTO_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
-  const STOCK_INTERVALS = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo'];
+  const STOCK_INTERVALS = ['1m', '5m', '15m', '30m', '1h'];
 
   const intervals = assetType === 'crypto' ? CRYPTO_INTERVALS : STOCK_INTERVALS;
 
@@ -56,8 +56,8 @@ export default function Home() {
              <span className="text-gray-500 py-2 ml-4">Stock:</span>
              <button onClick={() => handleSymbolChange('AAPL', 'stock')} className={`px-3 py-1 rounded text-xs font-medium transition-colors ${symbol === 'AAPL' ? 'bg-blue-600' : 'bg-[#2A2E39] hover:bg-gray-700'}`}>AAPL</button>
              <button onClick={() => handleSymbolChange('TSLA', 'stock')} className={`px-3 py-1 rounded text-xs font-medium transition-colors ${symbol === 'TSLA' ? 'bg-blue-600' : 'bg-[#2A2E39] hover:bg-gray-700'}`}>TSLA</button>
-             <button onClick={() => handleSymbolChange('0700.HK', 'stock')} className={`px-3 py-1 rounded text-xs font-medium transition-colors ${symbol === '0700.HK' ? 'bg-blue-600' : 'bg-[#2A2E39] hover:bg-gray-700'}`}>Tencent</button>
-             <button onClick={() => handleSymbolChange('600519.SS', 'stock')} className={`px-3 py-1 rounded text-xs font-medium transition-colors ${symbol === '600519.SS' ? 'bg-blue-600' : 'bg-[#2A2E39] hover:bg-gray-700'}`}>Moutai</button>
+             <button onClick={() => handleSymbolChange('700.HK', 'stock')} className={`px-3 py-1 rounded text-xs font-medium transition-colors ${symbol === '0700.HK' ? 'bg-blue-600' : 'bg-[#2A2E39] hover:bg-gray-700'}`}>Tencent</button>
+             <button onClick={() => handleSymbolChange('600519.SH', 'stock')} className={`px-3 py-1 rounded text-xs font-medium transition-colors ${symbol === '600519.SS' ? 'bg-blue-600' : 'bg-[#2A2E39] hover:bg-gray-700'}`}>Moutai</button>
         </div>
       </div>
         
@@ -66,7 +66,7 @@ export default function Home() {
           <div className="flex-1 border border-gray-800 rounded-lg overflow-hidden shadow-2xl relative bg-[#1E222D]">
               {isLoading && <div className="absolute inset-0 flex items-center justify-center bg-[#1E222D] z-20">Loading...</div>}
               {isError && <div className="absolute inset-0 flex items-center justify-center bg-red-900/50 z-20 text-red-400">Error fetching data (Check API Logs)</div>}
-              {data && <ChartComponent data={data} />}
+              {data && <ChartComponent data={data} symbol={symbol} />}
           </div>
 
           {/* Sidebar Area */}

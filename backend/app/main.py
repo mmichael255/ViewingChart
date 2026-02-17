@@ -12,7 +12,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from app.routers import market_data
 
 from app.routers import market_data, chat, news
 from app.database.connection import engine

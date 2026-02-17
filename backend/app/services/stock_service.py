@@ -1,46 +1,102 @@
-import yfinance as yf
+import requests
+import os
 from typing import List, Dict, Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class StockService:
-    def get_klines(self, symbol: str, interval: str = "1d", period: str = "1y") -> List[Dict[str, Any]]:
+    def __init__(self):
+        self.api_url = os.getenv("ITICK_API_URL", "https://api.itick.org")
+        self.api_token = os.getenv("ITICK_API_TOKEN", "")
+        
+        if not self.api_token:
+            print("WARNING: ITICK_API_TOKEN not set in .env file")
+    
+    def _get_region_and_code(self, symbol: str) -> tuple[str, str]:
         """
-        Fetch historical data from Yahoo Finance.
+        Convert Yahoo-style symbols to iTick format.
+        Examples:
+        - AAPL -> (US, AAPL)
+        - 0700.HK -> (HK, 00700)
+        - 600519.SS -> (CN, 600519)
+        """
+        if ".HK" in symbol:
+            code = symbol.replace(".HK", "")
+            return "HK", code
+        elif ".SH" in symbol:
+            code = symbol.replace(".SH", "")
+            return "SH", code
+        else:
+            # Assume US stock
+            return "US", symbol
+    
+    def _map_interval_to_ktype(self, interval: str) -> int:
+        """
+        Map user-friendly interval to iTick kType.
+        kType values:
+        1 = 1 minute
+        2 = 5 minutes
+        3 = 15 minutes
+        4 = 30 minutes
+        5 = 1 hour
+        6 = 1 day (NOTE: May not be available for all stocks)
+        7 = 1 week
+        10 = 1 month
+        """
+        interval_map = {
+            "1m": 1,
+            "5m": 2,
+            "15m": 3,
+            "30m": 4,
+            "1h": 5,
+        }
+        return interval_map.get(interval, 2)  # Default to 5min
+    
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Fetch historical kline data from iTick API.
         """
         try:
-            # yfinance expects symbols like 'AAPL', '0700.HK', '600519.SS'
-            # Auto-select period based on interval to avoid Yahoo limits
-            if interval == "1m":
-                period = "7d"
-            elif interval in ["2m", "5m", "15m", "30m", "90m"]:
-                period = "59d" # 60d is the limit, use 59 to be safe
-            elif interval in ["60m", "1h"]:
-                period = "730d" # 2 years
-            else:
-                period = "max" # 1d, 1wk, 1mo use max available
-
-            ticker = yf.Ticker(symbol)
-            history = ticker.history(period=period, interval=interval)
+            region, code = self._get_region_and_code(symbol)
+            ktype = self._map_interval_to_ktype(interval)
             
-            if history.empty:
+            url = f"{self.api_url}/stock/kline"
+            headers = {
+                "accept": "application/json",
+                "token": self.api_token
+            }
+            params = {
+                "region": region,  # iTick uses uppercase regions (US, HK, CN)
+                "code": code,
+                "kType": ktype,
+                "limit": limit
+            }
+            
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            # iTick response format: {code, data: [{t, o, h, l, c, v, tu}]}
+            if not data or "data" not in data or not data["data"]:
                 return []
             
             formatted_data = []
-            for date, row in history.iterrows():
-                # Lightweight charts expects seconds
-                time_val = int(date.timestamp())
-                
+            for candle in data["data"]:
+                # iTick returns: t (timestamp ms), o (open), h (high), l (low), c (close), v (volume)
                 formatted_data.append({
-                    "time": time_val,
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
-                    "volume": float(row["Volume"])
+                    "time": int(candle["t"] / 1000),  # Convert ms to seconds
+                    "open": float(candle["o"]),
+                    "high": float(candle["h"]),
+                    "low": float(candle["l"]),
+                    "close": float(candle["c"]),
+                    "volume": float(candle["v"])
                 })
-                
+            
             return formatted_data
+            
         except Exception as e:
-            print(f"Error fetching stock data for {symbol}: {e}")
+            print(f"Error fetching stock data from iTick for {symbol}: {e}")
             return []
 
 stock_service = StockService()
