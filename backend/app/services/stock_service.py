@@ -1,5 +1,6 @@
-import requests
+import time
 import os
+import requests
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 
@@ -12,13 +13,16 @@ class StockService:
         
         if not self.api_token:
             print("WARNING: ITICK_API_TOKEN not set in .env file")
+            
+        self.cache = {} # {symbol: {data, timestamp}}
+        self.cache_duration = 30 # seconds
     
     def _get_region_and_code(self, symbol: str) -> tuple[str, str]:
         """
         Convert Yahoo-style symbols to iTick format.
         Examples:
         - AAPL -> (US, AAPL)
-        - 0700.HK -> (HK, 00700)
+        - 0700.HK -> (HK, 700)
         - 600519.SS -> (CN, 600519)
         """
         if ".HK" in symbol:
@@ -98,5 +102,66 @@ class StockService:
         except Exception as e:
             print(f"Error fetching stock data from iTick for {symbol}: {e}")
             return []
+
+    def get_quote(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch real-time quote for a single stock.
+        iTick result: {code, data: {s, ld, p, ch, chp, ...}}
+        - p: last price
+        - ld: last close (for comparison)
+        - ch: price change
+        - chp: price change percentage
+        """
+        try:
+            region, code = self._get_region_and_code(symbol)
+            url = f"{self.api_url}/stock/quote"
+            headers = {"accept": "application/json", "token": self.api_token}
+            params = {"region": region, "code": code}
+            
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data and data.get("data"):
+                quote = data["data"]
+                return {
+                    "lastPrice": float(quote.get("p", 0)),
+                    "priceChange": float(quote.get("ch", 0)),
+                    "priceChangePercent": float(quote.get("chp", 0))
+                }
+            return {}
+        except Exception as e:
+            if "429" in str(e):
+                # Don't log full error for rate limit
+                print(f"iTick rate limit hit for {symbol}, using cache or empty.")
+            else:
+                print(f"Error fetching quote from iTick for {symbol}: {e}")
+            return {}
+
+    def get_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch quotes for multiple stocks with basic caching.
+        """
+        results = {}
+        current_time = time.time()
+        
+        for sym in symbols:
+            # Check cache
+            if sym in self.cache:
+                data, timestamp = self.cache[sym]
+                if current_time - timestamp < self.cache_duration:
+                    results[sym] = data
+                    continue
+            
+            # Fetch fresh
+            quote = self.get_quote(sym)
+            if quote:
+                self.cache[sym] = (quote, current_time)
+                results[sym] = quote
+            
+            # Add small delay to avoid 429 on free tier burst
+            time.sleep(0.5)
+                
+        return results
 
 stock_service = StockService()
