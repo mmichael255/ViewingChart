@@ -58,4 +58,40 @@ class BinanceService:
             print(f"Error fetching data from Binance: {e}")
             return []
 
+    def get_ticker_24h(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch 24hr ticker price change statistics for multiple symbols.
+        URL: /api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT"]
+        """
+        if not symbols:
+            return {}
+            
+        # Format symbols as JSON array string
+        # Result: ["BTCUSDT","ETHUSDT"]
+        import json
+        symbols_str = json.dumps([s.upper() for s in symbols], separators=(',', ':'))
+        
+        url = f"{self.BASE_URL}/ticker/24hr"
+        params = {"symbols": symbols_str}
+        
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Index by symbol for easy lookup
+            result = {}
+            for ticker in data:
+                # Binance keys: s: symbol, c: lastPrice, p: priceChange, P: priceChangePercent
+                symbol = ticker["symbol"].upper()
+                result[symbol] = {
+                    "lastPrice": float(ticker["lastPrice"]),
+                    "priceChange": float(ticker["priceChange"]),
+                    "priceChangePercent": float(ticker["priceChangePercent"])
+                }
+            return result
+        except Exception as e:
+            print(f"Error fetching 24hr ticker from Binance: {e}")
+            return {}
+
 binance_service = BinanceService()
