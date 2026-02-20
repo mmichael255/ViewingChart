@@ -1,9 +1,64 @@
 import requests
-from typing import List, Dict, Any
+import time
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 class BinanceService:
     BASE_URL = "https://api.binance.com/api/v3"
+
+    def __init__(self):
+        self.symbols_cache: List[Dict[str, str]] = []
+        self.symbols_last_fetched: float = 0
+        self.cache_duration = 3600  # 1 hour
+
+    def _fetch_exchange_info(self) -> None:
+        """Fetch and cache trading pairs from Binance exchange info."""
+        current_time = time.time()
+        if self.symbols_cache and (current_time - self.symbols_last_fetched < self.cache_duration):
+            return
+
+        try:
+            response = requests.get(f"{self.BASE_URL}/exchangeInfo")
+            response.raise_for_status()
+            data = response.json()
+            
+            # Filter for trading pairs only (TRADING status)
+            symbols = []
+            for symbol_info in data.get("symbols", []):
+                if symbol_info.get("status") == "TRADING":
+                    symbols.append({
+                        "symbol": symbol_info["symbol"],
+                        "baseAsset": symbol_info["baseAsset"],
+                        "quoteAsset": symbol_info["quoteAsset"]
+                    })
+                    
+            self.symbols_cache = symbols
+            self.symbols_last_fetched = current_time
+        except Exception as e:
+            print(f"Error fetching exchange info from Binance: {e}")
+
+    def search_symbols(self, query: str, limit: int = 10) -> List[Dict[str, str]]:
+        """Search cached symbols by symbol name or base asset."""
+        self._fetch_exchange_info()
+        
+        if not query:
+            return self.symbols_cache[:limit]
+            
+        query = query.upper()
+        results = []
+        
+        # Exact match pattern or starting with
+        for s in self.symbols_cache:
+            symbol_name = s["symbol"].upper()
+            base_asset = s["baseAsset"].upper()
+            
+            if query in symbol_name or query == base_asset:
+                results.append(s)
+                
+            if len(results) >= limit:
+                break
+                
+        return results
 
     def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> List[Dict[str, Any]]:
         """

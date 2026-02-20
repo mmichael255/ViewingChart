@@ -70,3 +70,15 @@ async def get_tickers(crypto_symbols: str = "", stock_symbols: str = ""):
             results.update(s_data)
             
     return results
+
+@router.get("/search")
+async def search_markets(query: str, asset_type: str = "crypto"):
+    """
+    Search for market symbols by query string.
+    """
+    if asset_type == "crypto":
+        results = binance_service.search_symbols(query)
+        return results
+    else:
+        # Stock search is currently unsupported/limited
+        return []

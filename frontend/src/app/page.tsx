@@ -3,15 +3,33 @@
 import { ChartComponent } from '@/components/ChartComponent';
 import { NewsFeed } from '@/components/NewsFeed';
 import { PriceHighlight } from '@/components/Highlighting';
-import { IndicatorBar } from '@/components/IndicatorBar'; // New
-import { BottomIntervalBar } from '@/components/BottomIntervalBar'; // New
+import { IndicatorBar } from '@/components/IndicatorBar';
+import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef } from 'react';
+
+import { SymbolSearch } from '@/components/SymbolSearch'; // New
+
+const INITIAL_CRYPTO_WATCHLIST = [
+  { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin' },
+  { sym: 'ETHUSDT', label: 'ETH', sub: 'Ethereum' },
+  { sym: 'SOLUSDT', label: 'SOL', sub: 'Solana' },
+];
+
+const STOCK_WATCHLIST = [
+  { sym: 'NVDA', label: 'NVDA', sub: 'NVIDIA' },
+  { sym: 'GOOG', label: 'GOOG', sub: 'Alphabet Inc.' },
+  { sym: 'TSLA', label: 'TSLA', sub: 'Tesla Inc.' },
+  { sym: 'AAPL', label: 'AAPL', sub: 'Apple Inc.' },
+];
 
 export default function Home() {
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [chartInterval, setChartInterval] = useState('1d');
   const [assetType, setAssetType] = useState('crypto');
+
+  const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
   // Quick Access Intervals
   // Default: 15m, 1h, 4h, 1d, 1w
@@ -19,28 +37,16 @@ export default function Home() {
   const [showAllIntervals, setShowAllIntervals] = useState(false);
 
   // Ticker state for watchlist
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [tickers, setTickers] = useState<Record<string, any>>({});
 
   const { data, isLoading, isError } = useMarketData(symbol, chartInterval, assetType);
 
-  const CRYPTO_WATCHLIST = [
-    { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin' },
-    { sym: 'ETHUSDT', label: 'ETH', sub: 'Ethereum' },
-    { sym: 'SOLUSDT', label: 'SOL', sub: 'Solana' },
-  ];
-
-  const STOCK_WATCHLIST = [
-    { sym: 'AAPL', label: 'AAPL', sub: 'Apple Inc.' },
-    { sym: 'TSLA', label: 'TSLA', sub: 'Tesla Inc.' },
-    { sym: '700.HK', label: '700.HK', sub: 'Tencent' },
-    { sym: '600519.SH', label: '600519.SH', sub: 'Moutai' },
-  ];
-
-  // Data Fetching Logic (Same as before)
+  // Data Fetching Logic
   useEffect(() => {
     const fetchTickers = async () => {
       try {
-        const cryptos = CRYPTO_WATCHLIST.map(i => i.sym).join(',');
+        const cryptos = cryptoWatchlist.map(i => i.sym).join(',');
         const stocks = STOCK_WATCHLIST.map(i => i.sym).join(',');
         const res = await fetch(`http://localhost:8000/market/tickers?crypto_symbols=${cryptos}&stock_symbols=${stocks}`);
         const newData = await res.json();
@@ -52,7 +58,7 @@ export default function Home() {
     fetchTickers();
     const id = window.setInterval(fetchTickers, 10000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [cryptoWatchlist]);
 
   useEffect(() => {
     const socket = new WebSocket('ws://localhost:8000/market/ws/tickers');
@@ -85,8 +91,6 @@ export default function Home() {
   };
 
   // --- Interval Interaction Logic ---
-
-  // 1. Reorder Quick Access (via Dragging the Toolbar Items)
   const handleQuickDragStart = (e: React.DragEvent, index: number) => {
     e.dataTransfer.setData("text/plain", index.toString());
     e.dataTransfer.effectAllowed = "move";
@@ -109,7 +113,6 @@ export default function Home() {
     e.preventDefault();
   };
 
-  // 2. Add/Remove from Dropdown
   const toggleQuickAccess = (interval: string, e: React.MouseEvent) => {
     e.stopPropagation(); // prevent setting interval
 
@@ -125,7 +128,6 @@ export default function Home() {
     }
   };
 
-
   const CRYPTO_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const STOCK_INTERVALS = ['1m', '5m', '15m', '30m', '1h'];
   const allIntervals = assetType === 'crypto' ? CRYPTO_INTERVALS : STOCK_INTERVALS;
@@ -133,22 +135,29 @@ export default function Home() {
   return (
     <div className="flex flex-col h-full min-h-screen bg-[#131722] text-white overflow-hidden">
       {/* ── Global Header ── */}
-      <header className="flex items-center justify-between px-5 h-12 border-b border-gray-800 bg-[#1E222D] shrink-0 z-40">
-        <div className="flex items-center gap-2">
+      <header className="flex items-center justify-between px-5 h-12 border-b border-gray-800 bg-[#1E222D] shrink-0 z-40 relative">
+        <div className="flex items-center gap-2 w-1/4">
           <span className="text-white font-bold text-lg tracking-tight">ViewingChart</span>
         </div>
-        <div className="flex items-center gap-3">
+
+        <div className="flex-1 flex justify-center w-2/4">
+          <SymbolSearch
+            onSelect={handleSymbolChange}
+            placeholder="Search crypto to view chart..."
+            className="w-72"
+          />
+        </div>
+
+        <div className="flex items-center gap-3 justify-end w-1/4">
           <div className="w-7 h-7 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400 cursor-pointer hover:bg-gray-600">👤</div>
         </div>
       </header>
 
       {/* ── Body ── */}
       <div className="flex flex-1 overflow-hidden h-full gap-1 p-1">
-
         {/* ── Main Chart Wrapper ── */}
         <main className="flex-1 flex h-full overflow-hidden relative border border-gray-800 bg-[#1E222D]">
-
-          {/* LEFT Drawing Toolbar (Moved from Right) */}
+          {/* LEFT Drawing Toolbar */}
           <div className="w-10 flex flex-col items-center border-r border-gray-800 bg-[#1E222D] py-2 gap-2 z-30 shrink-0">
             <ToolIcon icon="✜" tooltip="Crosshair" />
             <ToolIcon icon="／" tooltip="Trend Line" />
@@ -164,7 +173,6 @@ export default function Home() {
 
           {/* Center Chart Column */}
           <div className="flex-1 flex flex-col h-full min-w-0">
-
             {/* Chart Toolbar */}
             <div className="flex items-center gap-3 px-4 h-11 border-b border-gray-800 bg-[#1E222D] shrink-0 z-30">
               <div className="flex items-center gap-3 mr-4 shrink-0">
@@ -181,7 +189,7 @@ export default function Home() {
                     onDragStart={(e) => handleQuickDragStart(e, index)}
                     onDrop={(e) => handleQuickDrop(e, index)}
                     onDragOver={handleDragOver}
-                    className="cursor-move" // visual indicator for dragging
+                    className="cursor-move"
                   >
                     <button
                       onClick={() => handleIntervalChange(int)}
@@ -222,7 +230,7 @@ export default function Home() {
                               {isInQuick && canRemove && (
                                 <button
                                   onClick={(e) => toggleQuickAccess(int, e)}
-                                  className="text-[10px] text-gray-500 hover:text-red-400"
+                                  className="text-sm font-bold text-gray-400 hover:text-red-400 hover:bg-red-400/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
                                   title="Remove from favorites"
                                 >
                                   ✕
@@ -231,7 +239,7 @@ export default function Home() {
                               {!isInQuick && canAdd && (
                                 <button
                                   onClick={(e) => toggleQuickAccess(int, e)}
-                                  className="text-[10px] text-gray-500 hover:text-[#2962FF]"
+                                  className="text-sm font-bold text-gray-400 hover:text-[#2962FF] hover:bg-[#2962FF]/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
                                   title="Add to favorites"
                                 >
                                   ＋
@@ -276,10 +284,15 @@ export default function Home() {
         {/* ── Sidebar ── */}
         <aside className="w-[320px] shrink-0 flex flex-col border border-gray-800 bg-[#1E222D] overflow-hidden z-20 shadow-xl">
           <div className="flex flex-col h-full overflow-hidden">
-            <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden">
+            <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden relative">
               <div className="px-4 py-3 border-b border-gray-800 flex justify-between items-center bg-[#1E222D]">
                 <span className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">Watchlist</span>
-                <button className="text-[9px] font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-2 py-0.5 rounded transition-all">＋</button>
+                <button
+                  onClick={() => setIsAddModalOpen(true)}
+                  className="text-[9px] font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-2 py-0.5 rounded transition-all flex items-center gap-1"
+                >
+                  <span>＋</span> Add
+                </button>
               </div>
               <div className="grid grid-cols-12 px-4 py-1.5 text-[9px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-800/50 bg-[#1E222D]">
                 <div className="col-span-4">Symbol</div>
@@ -288,7 +301,7 @@ export default function Home() {
                 <div className="col-span-3 text-right">Chg%</div>
               </div>
               <div className="flex-1 overflow-y-auto p-1 scrollbar-thin scrollbar-thumb-gray-800">
-                <WatchlistGroup title="Crypto" items={CRYPTO_WATCHLIST} tickers={tickers} handleSymbolChange={handleSymbolChange} symbol={symbol} type="crypto" />
+                <WatchlistGroup title="Crypto" items={cryptoWatchlist} tickers={tickers} handleSymbolChange={handleSymbolChange} symbol={symbol} type="crypto" />
                 <WatchlistGroup title="Stocks" items={STOCK_WATCHLIST} tickers={tickers} handleSymbolChange={handleSymbolChange} symbol={symbol} type="stock" />
               </div>
             </div>
@@ -298,6 +311,31 @@ export default function Home() {
           </div>
         </aside>
       </div>
+
+      {/* Add to Watchlist Modal */}
+      {isAddModalOpen && (
+        <div className="absolute inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm" onClick={() => setIsAddModalOpen(false)}>
+          <div className="bg-[#1E222D] border border-gray-700 p-5 rounded-lg shadow-2xl w-[400px]" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-white font-bold">Add Crypto Symbol</h3>
+              <button onClick={() => setIsAddModalOpen(false)} className="text-gray-400 hover:text-white transition-colors">✕</button>
+            </div>
+            <SymbolSearch
+              onSelect={(sym, type) => {
+                if (!cryptoWatchlist.find(i => i.sym === sym)) {
+                  // Derive a label like "BTC" from "BTCUSDT" (simplistic heuristic)
+                  const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
+                  setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto' }]);
+                }
+                setIsAddModalOpen(false);
+              }}
+              placeholder="Type a symbol e.g BTC..."
+              className="w-full"
+              autoFocus
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -308,11 +346,13 @@ const ToolIcon = ({ icon, tooltip }: { icon: string, tooltip: string }) => (
   </button>
 );
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, type }: any) => (
   <>
     <div className="px-3 py-1 mb-1 mt-2">
       <span className="text-[9px] font-black text-[#2962FF] uppercase tracking-widest">{title}</span>
     </div>
+    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
     {items.map(({ sym, label, sub }: any) => {
       const ticker = tickers[sym] || {};
       const isUp = (ticker.priceChange || 0) >= 0;
