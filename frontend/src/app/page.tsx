@@ -29,12 +29,23 @@ export default function Home() {
   const [assetType, setAssetType] = useState('crypto');
 
   const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
 
   // Quick Access Intervals
   // Default: 15m, 1h, 4h, 1d, 1w
   const [quickIntervals, setQuickIntervals] = useState(['15m', '1h', '4h', '1d', '1w']);
   const [showAllIntervals, setShowAllIntervals] = useState(false);
+  const intervalDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (intervalDropdownRef.current && !intervalDropdownRef.current.contains(event.target as Node)) {
+        setShowAllIntervals(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   // Ticker state for watchlist
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -60,14 +71,36 @@ export default function Home() {
     return () => window.clearInterval(id);
   }, [cryptoWatchlist]);
 
+  const wsRef = useRef<WebSocket | null>(null);
+
   useEffect(() => {
     const socket = new WebSocket('ws://localhost:8000/market/ws/tickers');
+    wsRef.current = socket;
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        action: 'subscribe',
+        symbols: cryptoWatchlist.map(i => i.sym)
+      }));
+    };
+
     socket.onmessage = (event) => {
       const updates = JSON.parse(event.data);
       setTickers(prev => ({ ...prev, ...updates }));
     };
+
     return () => socket.close();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Initialize once
+
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'subscribe',
+        symbols: cryptoWatchlist.map(i => i.sym)
+      }));
+    }
+  }, [cryptoWatchlist]);
 
   useEffect(() => {
     if (data && data.length > 0) {
@@ -141,11 +174,12 @@ export default function Home() {
         </div>
 
         <div className="flex-1 flex justify-center w-2/4">
-          <SymbolSearch
-            onSelect={handleSymbolChange}
-            placeholder="Search crypto to view chart..."
-            className="w-72"
-          />
+          <button
+            onClick={() => setSearchModalMode('search')}
+            className="w-72 bg-[#131722] border border-gray-700 text-white placeholder-gray-500 py-2 text-sm rounded-full text-left pl-4 hover:border-[#2962FF] transition-colors flex items-center"
+          >
+            <span className="text-gray-500">Search</span>
+          </button>
         </div>
 
         <div className="flex items-center gap-3 justify-end w-1/4">
@@ -200,10 +234,10 @@ export default function Home() {
                   </div>
                 ))}
 
-                <div className="relative ml-1">
+                <div className="relative ml-1" ref={intervalDropdownRef}>
                   <button
                     onClick={() => setShowAllIntervals(!showAllIntervals)}
-                    className={`px-1 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-gray-700 transition-colors ${showAllIntervals ? 'bg-gray-700 text-white' : ''}`}
+                    className={`px-2 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-gray-700 transition-colors ${showAllIntervals ? 'bg-gray-700 text-white' : ''}`}
                   >
                     ⌄
                   </button>
@@ -211,7 +245,6 @@ export default function Home() {
                   {/* Dropdown Menu */}
                   {showAllIntervals && (
                     <div className="absolute top-full left-0 mt-1 bg-[#1E222D] border border-gray-700 rounded shadow-2xl p-2 grid grid-cols-1 gap-0.5 z-50 min-w-[120px] max-h-[300px] overflow-y-auto">
-                      <div className="text-[10px] text-gray-500 font-bold px-2 py-1 uppercase">Select Interval</div>
                       {allIntervals.map(int => {
                         const isInQuick = quickIntervals.includes(int);
                         const canAdd = !isInQuick && quickIntervals.length < 5;
@@ -285,13 +318,13 @@ export default function Home() {
         <aside className="w-[320px] shrink-0 flex flex-col border border-gray-800 bg-[#1E222D] overflow-hidden z-20 shadow-xl">
           <div className="flex flex-col h-full overflow-hidden">
             <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden relative">
-              <div className="px-4 py-3 border-b border-gray-800 flex justify-between items-center bg-[#1E222D]">
-                <span className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">Watchlist</span>
+              <div className="px-4 py-4 border-b border-gray-800 flex justify-between items-center bg-[#1E222D]">
+                <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest">Watchlist</span>
                 <button
-                  onClick={() => setIsAddModalOpen(true)}
-                  className="text-[9px] font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-2 py-0.5 rounded transition-all flex items-center gap-1"
+                  onClick={() => setSearchModalMode('add')}
+                  className="text-xs font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
                 >
-                  <span>＋</span> Add
+                  <span className="text-sm leading-none">＋</span> Add
                 </button>
               </div>
               <div className="grid grid-cols-12 px-4 py-1.5 text-[9px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-800/50 bg-[#1E222D]">
@@ -312,27 +345,35 @@ export default function Home() {
         </aside>
       </div>
 
-      {/* Add to Watchlist Modal */}
-      {isAddModalOpen && (
-        <div className="absolute inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm" onClick={() => setIsAddModalOpen(false)}>
-          <div className="bg-[#1E222D] border border-gray-700 p-5 rounded-lg shadow-2xl w-[400px]" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-white font-bold">Add Crypto Symbol</h3>
-              <button onClick={() => setIsAddModalOpen(false)} className="text-gray-400 hover:text-white transition-colors">✕</button>
+      {/* Unified Search Modal */}
+      {searchModalMode !== 'closed' && (
+        <div className="absolute inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm" onClick={() => setSearchModalMode('closed')}>
+          <div className="bg-[#1E222D] border border-gray-700 rounded-lg shadow-2xl w-[500px] h-[500px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center p-4 border-b border-gray-800 shrink-0">
+              <h3 className="text-white font-bold">
+                {searchModalMode === 'add' ? 'Add Crypto to Watchlist' : 'Search Crypto'}
+              </h3>
+              <button onClick={() => setSearchModalMode('closed')} className="text-gray-400 hover:text-white transition-colors">✕</button>
             </div>
-            <SymbolSearch
-              onSelect={(sym, type) => {
-                if (!cryptoWatchlist.find(i => i.sym === sym)) {
-                  // Derive a label like "BTC" from "BTCUSDT" (simplistic heuristic)
-                  const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
-                  setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto' }]);
-                }
-                setIsAddModalOpen(false);
-              }}
-              placeholder="Type a symbol e.g BTC..."
-              className="w-full"
-              autoFocus
-            />
+            <div className="flex-1 overflow-hidden relative">
+              <SymbolSearch
+                mode={searchModalMode}
+                onSelect={(sym, type) => {
+                  if (searchModalMode === 'add') {
+                    if (!cryptoWatchlist.find(i => i.sym === sym)) {
+                      const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
+                      setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto' }]);
+                    }
+                  } else {
+                    handleSymbolChange(sym, type);
+                  }
+                  setSearchModalMode('closed');
+                }}
+                placeholder={searchModalMode === 'add' ? "Search symbol to add..." : "Search symbol to view chart..."}
+                className="w-full h-full"
+                autoFocus
+              />
+            </div>
           </div>
         </div>
       )}
