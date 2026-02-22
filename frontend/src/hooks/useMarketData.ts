@@ -27,15 +27,20 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         }
     );
 
+    // Fallback: If no realtime data yet, use SWR's initialData directly in the render cycle rather than syncing via effect
     const [realtimeData, setRealtimeData] = useState<KlineData[] | undefined>(undefined);
     const wsRef = useRef<WebSocket | null>(null);
 
-    // Sync SWR data to local state
+    const initialDataRef = useRef<KlineData[]>([]);
     useEffect(() => {
-        if (initialData) {
-            setRealtimeData(initialData);
-        }
+        if (initialData) initialDataRef.current = initialData;
     }, [initialData]);
+
+    // Track when initial data changes to optionally reset realtime data if symbol changes
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+        setRealtimeData(undefined);
+    }, [symbol, interval, assetType]);
 
     // WebSocket logic for Crypto
     useEffect(() => {
@@ -57,21 +62,22 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             const update: KlineData = JSON.parse(event.data);
 
             setRealtimeData(currentData => {
-                if (!currentData) return [update];
+                const baseData = currentData || initialDataRef.current;
+                if (!baseData || baseData.length === 0) return [update];
 
-                const lastCandle = currentData[currentData.length - 1];
+                const lastCandle = baseData[baseData.length - 1];
 
                 // If update time is same as last candle, update it (tick)
                 // If update time is newer, append it (new candle)
                 if (lastCandle.time === update.time) {
-                    const newData = [...currentData];
+                    const newData = [...baseData];
                     newData[newData.length - 1] = update;
                     return newData;
                 } else if (update.time > lastCandle.time) {
-                    return [...currentData, update];
+                    return [...baseData, update];
                 }
 
-                return currentData;
+                return baseData;
             });
         };
 

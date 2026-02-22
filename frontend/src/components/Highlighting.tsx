@@ -31,22 +31,21 @@ export const PriceHighlight: React.FC<PriceHighlightProps> = ({
             const oldPrice = lastPriceRef.current;
             const isUp = Number(currentPriceStr) >= Number(oldPrice);
 
-            // Fix: Ignore transition from 0 or "0.00" (initial load) to a real price
+            // Ignore transition from 0 or "0.00" (initial load) to a real price
             const isInitialLoad = Number(oldPrice) === 0;
 
             lastPriceRef.current = currentPriceStr;
 
-            if (isInitialLoad) {
-                // Just update base to current, no color, no blink (or maybe blink white? user said 'initially white')
-                setComparisonBase(currentPriceStr);
-                setDirection(null);
-                // We don't increment tickKey so it doesn't blink green/red
-                // But acts as a fresh start
-            } else {
+            if (!isInitialLoad) {
                 // Normal update
+                // We purposefully trigger a state update here because we need the UI to flash
+                // based on the new tick's relation to the old price.
                 setComparisonBase(oldPrice);
                 setDirection(isUp ? "up" : "down");
                 setTickKey(prev => prev + 1);
+            } else {
+                setComparisonBase(currentPriceStr);
+                setDirection(null);
             }
         }
     }, [currentPriceStr]);

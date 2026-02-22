@@ -3,7 +3,7 @@
 import { ChartComponent } from '@/components/ChartComponent';
 import { NewsFeed } from '@/components/NewsFeed';
 import { PriceHighlight } from '@/components/Highlighting';
-import { IndicatorBar } from '@/components/IndicatorBar';
+import { IndicatorBar, IndicatorConfig, availableIndicators } from '@/components/IndicatorBar';
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef } from 'react';
@@ -30,6 +30,12 @@ export default function Home() {
 
   const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
   const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
+
+  // Indicators State
+  const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([
+    { id: 'ma', type: 'overlay', name: 'MA', params: { periods: [7, 25, 99] } },
+    { id: 'volume', type: 'oscillator', name: 'VOLUME', params: {} }
+  ]);
 
   // Quick Access Intervals
   // Default: 15m, 1h, 4h, 1d, 1w
@@ -298,12 +304,12 @@ export default function Home() {
                 </div>
               )}
               <div className="flex-1 min-h-0 relative">
-                {data && <ChartComponent data={data} symbol={symbol} />}
+                {data && <ChartComponent data={data} symbol={symbol} indicators={activeIndicators} />}
               </div>
 
               {/* ── Bottom Stack ── */}
               <div className="shrink-0 flex flex-col z-30 w-full bg-[#131722]">
-                <IndicatorBar />
+                <IndicatorBar activeIndicators={activeIndicators} onChange={setActiveIndicators} />
                 <BottomIntervalBar
                   intervals={allIntervals}
                   currentInterval={chartInterval}
