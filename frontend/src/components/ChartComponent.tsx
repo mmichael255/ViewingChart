@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, HistogramData, Time, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
@@ -41,15 +42,11 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
     const indicatorSeriesRefs = useRef<{ [id: string]: ISeriesApi<"Line" | "Histogram">[] }>({});
 
     // Legend State
-    const [legendData, setLegendData] = useState<{
-        time?: string;
-        open?: number;
-        high?: number;
-        low?: number;
-        close?: number;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        [key: string]: any;
-    }>({});
+    const [hoverLegendData, setHoverLegendData] = useState<any>(null);
+    const [defaultLegendData, setDefaultLegendData] = useState<any>({});
+
+    // Active UI Legend state prioritizes hover, falls back to static default
+    const legendData = hoverLegendData || defaultLegendData;
 
     // Memoize the format needed for the math utils (needs Open, High, Low, Close, Volume)
     // We approximate it using just the candlestick data since lightweight-charts CandlestickData has open, high, low, close.
@@ -69,7 +66,8 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                 high: Number(raw.high) || 0,
                 low: Number(raw.low) || 0,
                 close: Number(raw.close) || 0,
-                volume: 0
+                // Handle different possible API property names for volume
+                volume: Number((raw as any).volume || (raw as any).vol) || 0
             };
         });
 
@@ -142,7 +140,37 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         };
     }, [colors.backgroundColor, colors.textColor]);
 
-    // 2. Update Data and Handle Indicators
+    const lastDataLength = useRef<number>(0);
+
+    // 1.5 Update Base Series Data (Decoupled from indicators so it doesn't cause zoom resets on toggle)
+    useEffect(() => {
+        if (candlestickSeriesRef.current && data && Array.isArray(data)) {
+            const validData = data
+                .filter(d => d && d.time !== undefined && d.time !== null)
+                .map(d => {
+                    const t = typeof d.time === 'string' && !isNaN(Number(d.time)) ? Number(d.time) : d.time;
+                    return { ...d, time: t as Time };
+                });
+            if (validData.length > 0) {
+                // Determine if we should perform a full setData or just an incremental update
+                // If it's the exact same array length we are probably just updating the current active tick.
+                // If it grew by exactly 1 we are appending a single new tick stream.
+                // Otherwise, it's a fresh buffer load.
+                const isIncremental = validData.length === lastDataLength.current || validData.length === lastDataLength.current + 1;
+
+                if (isIncremental && lastDataLength.current > 0) {
+                    // Just update the latest tick to prevent LightweightCharts from constantly overwriting viewport bounds
+                    candlestickSeriesRef.current.update(validData[validData.length - 1]);
+                } else {
+                    // Fallback to full reset on fresh loads
+                    candlestickSeriesRef.current.setData(validData);
+                }
+                lastDataLength.current = validData.length;
+            }
+        }
+    }, [data]);
+
+    // 2. Update Overlay Indicators
     useEffect(() => {
         if (!chartRef.current) return;
         const chart = chartRef.current;
@@ -155,32 +183,33 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         });
         indicatorSeriesRefs.current = {};
 
-        // Update Base Series
-        if (candlestickSeriesRef.current && data && Array.isArray(data)) {
-            const validData = data
-                .filter(d => d && d.time !== undefined && d.time !== null)
-                .map(d => {
-                    const t = typeof d.time === 'string' && !isNaN(Number(d.time)) ? Number(d.time) : d.time;
-                    return { ...d, time: t as Time };
-                });
-            if (validData.length > 0) candlestickSeriesRef.current.setData(validData);
-        }
-
         // --- Handle Overlays ---
         const activeMAs = indicators.filter(ind => ind.id === 'ma');
         const activeEMAs = indicators.filter(ind => ind.id === 'ema');
         const activeBoll = indicators.find(ind => ind.id === 'boll');
         const activeSar = indicators.find(ind => ind.id === 'sar');
 
+        const newDefaultLegend: any = {};
+        if (klineDataForMath && klineDataForMath.length > 0) {
+            const last = klineDataForMath[klineDataForMath.length - 1];
+            newDefaultLegend.time = String(last.time);
+            newDefaultLegend.open = last.open;
+            newDefaultLegend.high = last.high;
+            newDefaultLegend.low = last.low;
+            newDefaultLegend.close = last.close;
+        }
+
         activeMAs.forEach((ma) => {
             const periods = Array.isArray(ma.params?.periods) ? ma.params.periods : [20];
             periods.forEach((p: number, pIdx: number) => {
                 const res = calculateSMA(klineDataForMath, p).filter(d => !isNaN(d.value));
-                const color = ['#2962FF', '#FF6D00', '#00C853'][pIdx % 3];
-                const series = chart.addSeries(LineSeries, { color, lineWidth: 1, crosshairMarkerVisible: false });
+                if (res.length > 0) newDefaultLegend[`${ma.name}_${pIdx}`] = res[res.length - 1].value;
+                const colors = ['#2962FF', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'];
+                const color = colors[pIdx % colors.length];
+                const series = chart.addSeries(LineSeries, { color, lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
                 series.setData(res.map(d => ({ time: d.time as Time, value: d.value })));
-                if (!indicatorSeriesRefs.current['ma']) indicatorSeriesRefs.current['ma'] = [];
-                indicatorSeriesRefs.current['ma'].push(series);
+                if (!indicatorSeriesRefs.current[ma.id]) indicatorSeriesRefs.current[ma.id] = [];
+                indicatorSeriesRefs.current[ma.id].push(series);
             });
         });
 
@@ -188,11 +217,13 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
             const periods = Array.isArray(ema.params?.periods) ? ema.params.periods : [20];
             periods.forEach((p: number, pIdx: number) => {
                 const res = calculateEMA(klineDataForMath, p).filter(d => !isNaN(d.value));
-                const color = ['#FFD600', '#E91E63', '#9C27B0'][pIdx % 3];
-                const series = chart.addSeries(LineSeries, { color, lineWidth: 1, crosshairMarkerVisible: false, lineStyle: 1 });
+                if (res.length > 0) newDefaultLegend[`${ema.name}_${pIdx}`] = res[res.length - 1].value;
+                const colors = ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#2962FF', '#FF6D00', '#00C853'];
+                const color = colors[pIdx % colors.length];
+                const series = chart.addSeries(LineSeries, { color, lineWidth: 1, crosshairMarkerVisible: false, lineStyle: 1, lastValueVisible: false, priceLineVisible: false });
                 series.setData(res.map(d => ({ time: d.time as Time, value: d.value })));
-                if (!indicatorSeriesRefs.current['ema']) indicatorSeriesRefs.current['ema'] = [];
-                indicatorSeriesRefs.current['ema'].push(series);
+                if (!indicatorSeriesRefs.current[ema.id]) indicatorSeriesRefs.current[ema.id] = [];
+                indicatorSeriesRefs.current[ema.id].push(series);
             });
         });
 
@@ -201,41 +232,59 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
             const m = (activeBoll.params?.multiplier as number) || 2;
             const res = calculateBOLL(klineDataForMath, p, m);
 
-            const upper = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false });
-            const middle = chart.addSeries(LineSeries, { color: 'rgba(255, 255, 255, 0.4)', lineWidth: 1, crosshairMarkerVisible: false });
-            const lower = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false });
+            if (res.length > 0) {
+                const last = res[res.length - 1];
+                newDefaultLegend[`${activeBoll.name}_0`] = last.upper;
+                newDefaultLegend[`${activeBoll.name}_1`] = last.middle;
+                newDefaultLegend[`${activeBoll.name}_2`] = last.lower;
+            }
+
+            const upper = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            const middle = chart.addSeries(LineSeries, { color: 'rgba(255, 255, 255, 0.4)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            const lower = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
 
             upper.setData(res.filter(d => !isNaN(d.upper)).map(d => ({ time: d.time as Time, value: d.upper })));
             middle.setData(res.filter(d => !isNaN(d.middle)).map(d => ({ time: d.time as Time, value: d.middle })));
             lower.setData(res.filter(d => !isNaN(d.lower)).map(d => ({ time: d.time as Time, value: d.lower })));
 
-            indicatorSeriesRefs.current['boll'] = [upper, middle, lower];
+            indicatorSeriesRefs.current[activeBoll.id] = [upper, middle, lower];
         }
 
         if (activeSar) {
             const step = (activeSar.params?.step as number) || 0.02;
             const maxStep = (activeSar.params?.maxStep as number) || 0.2;
             const res = calculateSAR(klineDataForMath, step, maxStep);
-            const series = chart.addSeries(LineSeries, { color: '#E91E63', lineWidth: 2, lineStyle: 3, crosshairMarkerVisible: false });
+
+            if (res.length > 0) newDefaultLegend[`${activeSar.name}_0`] = res[res.length - 1].value;
+
+            const series = chart.addSeries(LineSeries, { color: '#E91E63', lineWidth: 2, lineStyle: 3, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
             series.setData(res.filter(d => !isNaN(d.value)).map(d => ({ time: d.time as Time, value: d.value })));
-            indicatorSeriesRefs.current['sar'] = [series];
+            indicatorSeriesRefs.current[activeSar.id] = [series];
         }
+
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setDefaultLegendData(newDefaultLegend);
 
         // --- Handle Oscillators ---
         // We only render overlays on the main chart now. Oscillators are handled by the `<OscillatorPane />` mapped in the JSX.
 
     }, [data, indicators, klineDataForMath]);
 
-    // 3. Reset Zoom and setup crosshair subscription
+    // 3. Reset Zoom on asset switch
     useEffect(() => {
         if (chartRef.current && symbol) {
             chartRef.current.timeScale().fitContent();
             chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+        }
+    }, [symbol]);
 
+    // 4. Setup crosshair subscription
+    useEffect(() => {
+        if (chartRef.current && symbol) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const handleCrosshairMove = (param: any) => {
-                if (!param.time || !candlestickSeriesRef.current) {
-                    setLegendData({});
+                if (!param.time || !candlestickSeriesRef.current || param.point === undefined || param.point.x < 0 || param.point.y < 0) {
+                    setHoverLegendData(null);
                     return;
                 }
                 const candleData = param.seriesData.get(candlestickSeriesRef.current) as KlineData | undefined;
@@ -261,7 +310,7 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                     });
                 });
 
-                setLegendData(newLegendData);
+                setHoverLegendData(newLegendData);
             };
 
             chartRef.current.subscribeCrosshairMove(handleCrosshairMove);
@@ -272,6 +321,14 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
     }, [symbol, indicators]);
 
     const activeOscillators = indicators.filter(ind => ind.type === 'oscillator');
+
+    const localVolumeData = useMemo(() => {
+        return klineDataForMath.map(d => ({
+            time: d.time as Time,
+            value: d.volume,
+            color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+        }));
+    }, [klineDataForMath]);
 
     return (
         <div className="w-full h-full relative flex flex-col">
@@ -304,8 +361,14 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                                 <span className="font-bold">{titleLabel}</span>
                                 {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                                 {vals.map((v: any, i) => {
-                                    const colorStr = `hsl(${i * 60 + (ind.id === 'ema' ? 30 : 0)}, 80%, 70%)`;
-                                    return <span key={i} style={{ color: colorStr }}>{typeof v === 'number' ? v.toFixed(2) : String(v)}</span>
+                                    const getLegendColor = (id: string, index: number) => {
+                                        if (id === 'ma') return ['#2962FF', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'][index % 10];
+                                        if (id === 'ema') return ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#2962FF', '#FF6D00', '#00C853'][index % 10];
+                                        if (id === 'boll') return ['#2962FF', '#FFFFFF', '#2962FF'][index % 3];
+                                        if (id === 'sar') return '#E91E63';
+                                        return `hsl(${index * 60}, 80%, 70%)`;
+                                    };
+                                    return <span key={i} style={{ color: getLegendColor(ind.id, i) }}>{typeof v === 'number' ? v.toFixed(2) : String(v)}</span>
                                 })}
                             </div>
                         );
@@ -324,7 +387,7 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                     key={osc.id}
                     indicator={osc}
                     klineDataForMath={klineDataForMath}
-                    volumeData={osc.id === 'volume' ? volumeData : undefined}
+                    volumeData={osc.id === 'volume' ? localVolumeData : undefined}
                     mainChart={chartInstance}
                 />
             ))}

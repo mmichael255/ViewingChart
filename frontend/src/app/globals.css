@@ -100,3 +100,10 @@ body {
   scrollbar-width: thin;
   scrollbar-color: #374151 transparent;
 }
+
+/* Hide TradingView Lightweight Charts Watermark Logo */
+#tv-attr-logo,
+.tv-lightweight-charts-logo,
+a[href*="tradingview.com"] {
+    display: none !important;
+}
