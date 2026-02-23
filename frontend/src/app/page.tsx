@@ -14,6 +14,8 @@ const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin' },
   { sym: 'ETHUSDT', label: 'ETH', sub: 'Ethereum' },
   { sym: 'SOLUSDT', label: 'SOL', sub: 'Solana' },
+  { sym: 'XAUUSDT', label: 'XAU', sub: 'Gold' },
+  { sym: 'XAGUSDT', label: 'XAG', sub: 'Silver' },
 ];
 
 const STOCK_WATCHLIST = [
@@ -91,8 +93,14 @@ export default function Home() {
     };
 
     socket.onmessage = (event) => {
-      const updates = JSON.parse(event.data);
-      setTickers(prev => ({ ...prev, ...updates }));
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'ticker' && payload.data) {
+          setTickers(prev => ({ ...prev, ...payload.data }));
+        }
+      } catch (e) {
+        console.error("WS Ticker parsing error", e);
+      }
     };
 
     return () => socket.close();
