@@ -95,13 +95,17 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
         };
     }, [mainChart]);
 
-    // 2. Sync crosshair/zoom with MainChart
+    // 2. Sync crosshair/zoom with MainChart (Unidirectional: Main -> Sub)
     useEffect(() => {
         const chart = subChartRef.current;
         if (!mainChart || !chart) return;
 
         const handleSyncZoom = (range: any) => { if (range) chart.timeScale().setVisibleLogicalRange(range); };
-        const handleSyncLocalZoom = (range: any) => { if (range) mainChart.timeScale().setVisibleLogicalRange(range); };
+
+        // Immediately sync the oscillator to the main chart's current zoom on initialization
+        // so it doesn't default to .fitContent() and look disconnected before the user drags.
+        const currentRange = mainChart.timeScale().getVisibleLogicalRange();
+        if (currentRange) handleSyncZoom(currentRange);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const handleMainCrosshairMove = (param: any) => {
@@ -128,12 +132,10 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
         };
 
         mainChart.timeScale().subscribeVisibleLogicalRangeChange(handleSyncZoom);
-        chart.timeScale().subscribeVisibleLogicalRangeChange(handleSyncLocalZoom);
         mainChart.subscribeCrosshairMove(handleMainCrosshairMove);
 
         return () => {
             mainChart.timeScale().unsubscribeVisibleLogicalRangeChange(handleSyncZoom);
-            chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleSyncLocalZoom);
             mainChart.unsubscribeCrosshairMove(handleMainCrosshairMove);
         };
     }, [mainChart]);

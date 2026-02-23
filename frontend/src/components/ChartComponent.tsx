@@ -140,8 +140,6 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         };
     }, [colors.backgroundColor, colors.textColor]);
 
-    const lastDataLength = useRef<number>(0);
-
     // 1.5 Update Base Series Data (Decoupled from indicators so it doesn't cause zoom resets on toggle)
     useEffect(() => {
         if (candlestickSeriesRef.current && data && Array.isArray(data)) {
@@ -152,20 +150,7 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                     return { ...d, time: t as Time };
                 });
             if (validData.length > 0) {
-                // Determine if we should perform a full setData or just an incremental update
-                // If it's the exact same array length we are probably just updating the current active tick.
-                // If it grew by exactly 1 we are appending a single new tick stream.
-                // Otherwise, it's a fresh buffer load.
-                const isIncremental = validData.length === lastDataLength.current || validData.length === lastDataLength.current + 1;
-
-                if (isIncremental && lastDataLength.current > 0) {
-                    // Just update the latest tick to prevent LightweightCharts from constantly overwriting viewport bounds
-                    candlestickSeriesRef.current.update(validData[validData.length - 1]);
-                } else {
-                    // Fallback to full reset on fresh loads
-                    candlestickSeriesRef.current.setData(validData);
-                }
-                lastDataLength.current = validData.length;
+                candlestickSeriesRef.current.setData(validData);
             }
         }
     }, [data]);
