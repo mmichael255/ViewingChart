@@ -33,13 +33,17 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
     const initialDataRef = useRef<KlineData[]>([]);
     useEffect(() => {
-        if (initialData) initialDataRef.current = initialData;
+        if (initialData) {
+            initialDataRef.current = initialData;
+            setRealtimeData(initialData);
+        }
     }, [initialData]);
 
     // Track when initial data changes to optionally reset realtime data if symbol changes
     useEffect(() => {
         // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
         setRealtimeData(undefined);
+        initialDataRef.current = []; // CRITICAL FIX: explicit wipe of stale history on symbol change
     }, [symbol, interval, assetType]);
 
     // WebSocket logic for Crypto
@@ -63,7 +67,10 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
             setRealtimeData(currentData => {
                 const baseData = currentData || initialDataRef.current;
-                if (!baseData || baseData.length === 0) return [update];
+
+                // CRITICAL FIX: If historical REST data hasn't loaded yet, drop the WS tick to avoid
+                // freezing the entire chart state to a single 1-length candle array indefinitely.
+                if (!baseData || baseData.length === 0) return currentData;
 
                 const lastCandle = baseData[baseData.length - 1];
 

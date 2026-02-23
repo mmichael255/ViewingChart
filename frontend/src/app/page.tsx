@@ -95,8 +95,9 @@ export default function Home() {
     socket.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
-        if (payload.type === 'ticker' && payload.data) {
-          setTickers(prev => ({ ...prev, ...payload.data }));
+        // Backend broadcast_ticker natively sends: { "BTCUSDT": { lastPrice: X, ... } }
+        if (payload && typeof payload === 'object') {
+          setTickers(prev => ({ ...prev, ...payload }));
         }
       } catch (e) {
         console.error("WS Ticker parsing error", e);
