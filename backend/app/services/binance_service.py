@@ -116,37 +116,51 @@ class BinanceService:
     def get_ticker_24h(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         """
         Fetch 24hr ticker price change statistics for multiple symbols.
-        URL: /api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT"]
         """
+        import json
+
         if not symbols:
             return {}
-            
-        # Format symbols as JSON array string
-        # Result: ["BTCUSDT","ETHUSDT"]
-        import json
-        symbols_str = json.dumps([s.upper() for s in symbols], separators=(',', ':'))
-        
-        url = f"{self.BASE_URL}/ticker/24hr"
-        params = {"symbols": symbols_str}
-        
-        try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Index by symbol for easy lookup
-            result = {}
-            for ticker in data:
-                # Binance keys: s: symbol, c: lastPrice, p: priceChange, P: priceChangePercent
-                symbol = ticker["symbol"].upper()
-                result[symbol] = {
-                    "lastPrice": float(ticker["lastPrice"]),
-                    "priceChange": float(ticker["priceChange"]),
-                    "priceChangePercent": float(ticker["priceChangePercent"])
-                }
-            return result
-        except Exception as e:
-            print(f"Error fetching 24hr ticker from Binance: {e}")
-            return {}
+
+        spot_symbols = [s for s in symbols if s.upper() not in ["XAUUSDT", "XAGUSDT"]]
+        futures_symbols = [s for s in symbols if s.upper() in ["XAUUSDT", "XAGUSDT"]]
+
+        result = {}
+
+        # Fetch spot symbols independently
+        if spot_symbols:
+            try:
+                spot_str = json.dumps([s.upper() for s in spot_symbols], separators=(',', ':'))
+                url = f"{self.BASE_URL}/ticker/24hr"
+                response = requests.get(url, params={"symbols": spot_str}, timeout=15.0)
+                response.raise_for_status()
+                for ticker in response.json():
+                    symbol = ticker["symbol"].upper()
+                    result[symbol] = {
+                        "lastPrice": float(ticker["lastPrice"]),
+                        "priceChange": float(ticker["priceChange"]),
+                        "priceChangePercent": float(ticker["priceChangePercent"])
+                    }
+            except Exception as e:
+                print(f"Error fetching spot 24hr ticker from Binance: {e}")
+
+        # Fetch futures symbols independently
+        if futures_symbols:
+            try:
+                fut_str = json.dumps([s.upper() for s in futures_symbols], separators=(',', ':'))
+                url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+                response = requests.get(url, params={"symbols": fut_str}, timeout=15.0)
+                response.raise_for_status()
+                for ticker in response.json():
+                    symbol = ticker["symbol"].upper()
+                    result[symbol] = {
+                        "lastPrice": float(ticker["lastPrice"]),
+                        "priceChange": float(ticker["priceChange"]),
+                        "priceChangePercent": float(ticker["priceChangePercent"])
+                    }
+            except Exception as e:
+                print(f"Error fetching futures 24hr ticker from Binance: {e}")
+
+        return result
 
 binance_service = BinanceService()
