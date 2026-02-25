@@ -7,6 +7,9 @@ import { IndicatorBar, IndicatorConfig, availableIndicators } from '@/components
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef } from 'react';
+import { API_URL, WS_URL } from '@/config';
+import type { CandlestickData, Time } from 'lightweight-charts';
+import type { TickerData, WatchlistItem } from '@/types/market';
 
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
 
@@ -67,7 +70,7 @@ export default function Home() {
       try {
         const cryptos = cryptoWatchlist.map(i => i.sym).join(',');
         const stocks = STOCK_WATCHLIST.map(i => i.sym).join(',');
-        const res = await fetch(`http://localhost:8000/market/tickers?crypto_symbols=${cryptos}&stock_symbols=${stocks}`);
+        const res = await fetch(`${API_URL}/market/tickers?crypto_symbols=${cryptos}&stock_symbols=${stocks}`);
         const newData = await res.json();
         setTickers(prev => ({ ...prev, ...newData }));
       } catch (err) {
@@ -82,7 +85,7 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const socket = new WebSocket('ws://localhost:8000/market/ws/tickers');
+    const socket = new WebSocket(`${WS_URL}/market/ws/tickers`);
     wsRef.current = socket;
 
     socket.onopen = () => {
@@ -313,7 +316,7 @@ export default function Home() {
                 </div>
               )}
               <div className="flex-1 min-h-0 relative">
-                {data && <ChartComponent data={data} symbol={symbol} indicators={activeIndicators} />}
+                {data && <ChartComponent data={data as unknown as CandlestickData<Time>[]} symbol={symbol} indicators={activeIndicators} />}
               </div>
 
               {/* ── Bottom Stack ── */}

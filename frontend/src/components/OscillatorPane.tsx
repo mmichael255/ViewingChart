@@ -4,7 +4,8 @@
 import { createChart, ColorType, IChartApi, ISeriesApi, Time, HistogramSeries, LineSeries } from 'lightweight-charts';
 import React, { useEffect, useRef, useState } from 'react';
 import type { IndicatorConfig } from './IndicatorBar';
-import { calculateMACD, calculateRSI, calculateKDJ, KlineData } from '../utils/indicators';
+import { calculateMACD, calculateRSI, calculateKDJ } from '../utils/indicators';
+import type { KlineData } from '@/types/market';
 
 interface OscillatorPaneProps {
     indicator: IndicatorConfig;

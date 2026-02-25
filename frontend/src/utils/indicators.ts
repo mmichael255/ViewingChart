@@ -1,11 +1,4 @@
-export interface KlineData {
-    time: number | string | Record<string, unknown>;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-}
+import type { KlineData } from '@/types/market';
 
 // 1. Simple Moving Average (SMA)
 export function calculateSMA(data: KlineData[], period: number) {
