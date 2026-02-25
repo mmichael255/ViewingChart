@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { MessageCircle, X, Send } from "lucide-react";
-import { KlineData } from "@/hooks/useMarketData";
+import type { KlineData } from '@/types/market';
 import clsx from "clsx";
 
 interface Message {
@@ -44,7 +44,7 @@ export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
     try {
       // Use last 50 candles for context
       const context = chartData ? chartData.slice(-50) : [];
-      
+
       const res = await fetch("http://localhost:8000/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -53,9 +53,9 @@ export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
           chart_context: context
         })
       });
-      
+
       if (!res.ok) throw new Error("Failed to fetch response");
-      
+
       const data = await res.json();
       const aiMsg: Message = { id: (Date.now() + 1).toString(), role: "ai", content: data.response };
       setMessages(prev => [...prev, aiMsg]);

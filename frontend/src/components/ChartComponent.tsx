@@ -3,7 +3,8 @@
 
 import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, HistogramData, Time, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { calculateSMA, calculateEMA, calculateBOLL, calculateSAR, KlineData } from '../utils/indicators';
+import { calculateSMA, calculateEMA, calculateBOLL, calculateSAR } from '../utils/indicators';
+import type { KlineData } from '@/types/market';
 import type { IndicatorConfig } from './IndicatorBar';
 import { OscillatorPane } from './OscillatorPane';
 

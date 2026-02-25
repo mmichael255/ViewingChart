@@ -1,0 +1,41 @@
+# Indicator Bar Implementation Plan
+
+## Goal
+Implement the interactive Indicator Bar at the bottom of the chart. 
+1. The **MA part** (Main Chart Overlays) will have a `>` button that opens a selection menu.
+2. The **Volume part** (Sub-Chart Oscillators) will have an `edit` button that opens a modal with all indicators.
+3. List and explain all the technical indicators we can realistically implement using `lightweight-charts` and local JavaScript calculations.
+
+## User Review Required
+Please review the list of proposed indicators below and confirm if they meet your requirements. We will be calculating these strictly in JavaScript on the frontend using the raw Kline data (Open, High, Low, Close, Volume) fetched from the backend.
+
+### Proposed Indicators
+
+**Main Chart Overlays (Drawn directly on the price chart):**
+1. **MA (Simple Moving Average)**: A basic average of the closing prices over a specified number of periods. Smooths out price action to identify trends.
+2. **EMA (Exponential Moving Average)**: Similar to MA, but gives more weight to recent prices, making it react faster to price changes.
+3. **BOLL (Bollinger Bands)**: Consists of a middle band (usually an SMA) and an upper and lower band (standard deviations away from the SMA). Useful for identifying volatility and overbought/oversold conditions.
+4. **SAR (Parabolic SAR)**: Plots dots above or below the price to indicate potential trend reversals.
+
+**Sub-Chart Oscillators (Drawn in a separate pane below the price chart):**
+1. **Volume**: The total amount of asset traded in a given period (Already implemented, but we will formalize it as a toggleable indicator).
+2. **MACD (Moving Average Convergence Divergence)**: A trend-following momentum indicator that shows the relationship between two moving averages (usually 12-EMA and 26-EMA) and a signal line (9-EMA).
+3. **RSI (Relative Strength Index)**: A momentum oscillator that measures the speed and change of price movements, oscillating between 0 and 100. Useful for identifying overbought (>70) and oversold (<30) conditions.
+4. **KDJ**: A stochastic oscillator with three lines (K, D, J). It's highly sensitive and used to find trend reversals and optimal entry points.
+
+*(Note: Advanced custom indicators like "AI-Whale Orders", "Liquidation Map", or "OnChain Inflows" require specialized backend data feeds that are not currently available via the standard Binance public API, so we will focus on the standard math-based technical indicators above).*
+
+## Proposed Changes
+
+### [MODIFY] frontend/src/components/IndicatorBar.tsx
+* Add interactive state hooks (`useState`) to track the currently active indicators.
+* Implement a dropdown menu triggered by the `>` icon in the MA section for main chart overlays.
+* Implement a central modal triggered by the `edit` icon in the Volume section for all indicators.
+* Wire up `onClick` handlers to pass the selected configuration back up to the `ChartComponent`.
+
+### [NEW] frontend/src/utils/indicators.ts
+* Create a utility file containing the mathematical algorithms to calculate MA, EMA, BOLL, SAR, MACD, RSI, and KDJ from raw Kline data.
+
+### [MODIFY] frontend/src/components/ChartComponent.tsx
+* Refactor to accept an array of `activeIndicators` as a prop.
+* Update the Lightweight Charts initialization to dynamically mount/unmount additional `addLineSeries` (for overlays) and new Panes/Series (for oscillators) based on the user's active selections.

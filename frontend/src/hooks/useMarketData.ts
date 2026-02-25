@@ -1,21 +1,12 @@
 import useSWR from 'swr';
 import { Time } from 'lightweight-charts';
 import { useEffect, useState, useRef } from 'react';
+import { API_URL, WS_URL } from '@/config';
+import type { KlineData } from '@/types/market';
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
-export interface KlineData {
-    time: Time;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume?: number;
-}
-
 export function useMarketData(symbol: string, interval: string = '1d', assetType: string = 'crypto') {
-    const API_URL = 'http://localhost:8000';
-    const WS_URL = 'ws://localhost:8000';
 
     // Fetch initial data
     const { data: initialData, error, isLoading, mutate } = useSWR<KlineData[]>(
