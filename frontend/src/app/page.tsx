@@ -10,22 +10,22 @@ import { useEffect, useState, useRef } from 'react';
 import { API_URL, WS_URL } from '@/config';
 import type { CandlestickData, Time } from 'lightweight-charts';
 import type { TickerData, WatchlistItem } from '@/types/market';
-
+import { WatchlistSidebar } from '@/components/WatchlistSidebar';
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
 
 const INITIAL_CRYPTO_WATCHLIST = [
-  { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin' },
-  { sym: 'ETHUSDT', label: 'ETH', sub: 'Ethereum' },
-  { sym: 'SOLUSDT', label: 'SOL', sub: 'Solana' },
-  { sym: 'XAUUSDT', label: 'XAU', sub: 'Gold' },
-  { sym: 'XAGUSDT', label: 'XAG', sub: 'Silver' },
+  { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
+  { sym: 'ETHUSDT', label: 'ETH', sub: 'Ethereum', source: 'Binance' },
+  { sym: 'SOLUSDT', label: 'SOL', sub: 'Solana', source: 'Binance' },
+  { sym: 'XAUUSDT', label: 'XAU', sub: 'Gold', source: 'Binance Futures' },
+  { sym: 'XAGUSDT', label: 'XAG', sub: 'Silver', source: 'Binance Futures' },
 ];
 
 const STOCK_WATCHLIST = [
-  { sym: 'NVDA', label: 'NVDA', sub: 'NVIDIA' },
-  { sym: 'GOOG', label: 'GOOG', sub: 'Alphabet Inc.' },
-  { sym: 'TSLA', label: 'TSLA', sub: 'Tesla Inc.' },
-  { sym: 'AAPL', label: 'AAPL', sub: 'Apple Inc.' },
+  { sym: 'NVDA', label: 'NVDA', sub: 'NVIDIA', source: 'Yahoo Finance' },
+  { sym: 'GOOG', label: 'GOOG', sub: 'Alphabet Inc.', source: 'Yahoo Finance' },
+  { sym: 'TSLA', label: 'TSLA', sub: 'Tesla Inc.', source: 'Yahoo Finance' },
+  { sym: 'AAPL', label: 'AAPL', sub: 'Apple Inc.', source: 'Yahoo Finance' },
 ];
 
 export default function Home() {
@@ -34,6 +34,7 @@ export default function Home() {
   const [assetType, setAssetType] = useState('crypto');
 
   const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
+  const [stockWatchlist, setStockWatchlist] = useState(STOCK_WATCHLIST);
   const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
 
   // Indicators State
@@ -58,67 +59,7 @@ export default function Home() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Ticker state for watchlist
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [tickers, setTickers] = useState<Record<string, any>>({});
-
   const { data, isLoading, isError } = useMarketData(symbol, chartInterval, assetType);
-
-  // Data Fetching Logic
-  useEffect(() => {
-    const fetchTickers = async () => {
-      try {
-        const cryptos = cryptoWatchlist.map(i => i.sym).join(',');
-        const stocks = STOCK_WATCHLIST.map(i => i.sym).join(',');
-        const res = await fetch(`${API_URL}/market/tickers?crypto_symbols=${cryptos}&stock_symbols=${stocks}`);
-        const newData = await res.json();
-        setTickers(prev => ({ ...prev, ...newData }));
-      } catch (err) {
-        console.error("Failed to fetch tickers:", err);
-      }
-    };
-    fetchTickers();
-    const id = window.setInterval(fetchTickers, 10000);
-    return () => window.clearInterval(id);
-  }, [cryptoWatchlist]);
-
-  const wsRef = useRef<WebSocket | null>(null);
-
-  useEffect(() => {
-    const socket = new WebSocket(`${WS_URL}/market/ws/tickers`);
-    wsRef.current = socket;
-
-    socket.onopen = () => {
-      socket.send(JSON.stringify({
-        action: 'subscribe',
-        symbols: cryptoWatchlist.map(i => i.sym)
-      }));
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        // Backend broadcast_ticker natively sends: { "BTCUSDT": { lastPrice: X, ... } }
-        if (payload && typeof payload === 'object') {
-          setTickers(prev => ({ ...prev, ...payload }));
-        }
-      } catch (e) {
-        console.error("WS Ticker parsing error", e);
-      }
-    };
-
-    return () => socket.close();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Initialize once
-
-  useEffect(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        action: 'subscribe',
-        symbols: cryptoWatchlist.map(i => i.sym)
-      }));
-    }
-  }, [cryptoWatchlist]);
 
   useEffect(() => {
     if (data && data.length > 0) {
@@ -332,35 +273,13 @@ export default function Home() {
           </div>
         </main>
 
-        {/* ── Sidebar ── */}
-        <aside className="w-[320px] shrink-0 flex flex-col border border-gray-800 bg-[#1E222D] overflow-hidden z-20 shadow-xl">
-          <div className="flex flex-col h-full overflow-hidden">
-            <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden relative">
-              <div className="px-4 py-4 border-b border-gray-800 flex justify-between items-center bg-[#1E222D]">
-                <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest">Watchlist</span>
-                <button
-                  onClick={() => setSearchModalMode('add')}
-                  className="text-xs font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
-                >
-                  <span className="text-sm leading-none">＋</span> Add
-                </button>
-              </div>
-              <div className="grid grid-cols-12 px-4 py-1.5 text-[9px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-800/50 bg-[#1E222D]">
-                <div className="col-span-4">Symbol</div>
-                <div className="col-span-3 text-right">Last</div>
-                <div className="col-span-2 text-right">Chg</div>
-                <div className="col-span-3 text-right">Chg%</div>
-              </div>
-              <div className="flex-1 overflow-y-auto p-1 scrollbar-thin scrollbar-thumb-gray-800">
-                <WatchlistGroup title="Crypto" items={cryptoWatchlist} tickers={tickers} handleSymbolChange={handleSymbolChange} symbol={symbol} type="crypto" />
-                <WatchlistGroup title="Stocks" items={STOCK_WATCHLIST} tickers={tickers} handleSymbolChange={handleSymbolChange} symbol={symbol} type="stock" />
-              </div>
-            </div>
-            <div className="flex-1 flex flex-col bg-[#1E222D] overflow-hidden">
-              <NewsFeed compact />
-            </div>
-          </div>
-        </aside>
+        <WatchlistSidebar
+          cryptoWatchlist={cryptoWatchlist}
+          stockWatchlist={stockWatchlist}
+          symbol={symbol}
+          handleSymbolChange={handleSymbolChange}
+          setSearchModalMode={setSearchModalMode}
+        />
       </div>
 
       {/* Unified Search Modal */}
@@ -369,18 +288,24 @@ export default function Home() {
           <div className="bg-[#1E222D] border border-gray-700 rounded-lg shadow-2xl w-[500px] h-[500px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-center p-4 border-b border-gray-800 shrink-0">
               <h3 className="text-white font-bold">
-                {searchModalMode === 'add' ? 'Add Crypto to Watchlist' : 'Search Crypto'}
+                {searchModalMode === 'add' ? 'Add Symbol to Watchlist' : 'Search Symbol'}
               </h3>
               <button onClick={() => setSearchModalMode('closed')} className="text-gray-400 hover:text-white transition-colors">✕</button>
             </div>
             <div className="flex-1 overflow-hidden relative">
               <SymbolSearch
                 mode={searchModalMode}
-                onSelect={(sym, type) => {
+                onSelect={(sym, type, source) => {
                   if (searchModalMode === 'add') {
-                    if (!cryptoWatchlist.find(i => i.sym === sym)) {
-                      const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
-                      setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto' }]);
+                    if (type === 'crypto') {
+                      if (!cryptoWatchlist.find(i => i.sym === sym)) {
+                        const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
+                        setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto', source: source || 'Binance' }]);
+                      }
+                    } else {
+                      if (!stockWatchlist.find(i => i.sym === sym)) {
+                        setStockWatchlist(prev => [...prev, { sym, label: sym, sub: 'Stock/FX', source: source || 'Yahoo Finance' }]);
+                      }
                     }
                   } else {
                     handleSymbolChange(sym, type);
@@ -403,40 +328,4 @@ const ToolIcon = ({ icon, tooltip }: { icon: string, tooltip: string }) => (
   <button title={tooltip} className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-[#2962FF] hover:bg-[#2962FF]/10 rounded transition-colors text-xs">
     {icon}
   </button>
-);
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, type }: any) => (
-  <>
-    <div className="px-3 py-1 mb-1 mt-2">
-      <span className="text-[9px] font-black text-[#2962FF] uppercase tracking-widest">{title}</span>
-    </div>
-    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-    {items.map(({ sym, label, sub }: any) => {
-      const ticker = tickers[sym] || {};
-      const isUp = (ticker.priceChange || 0) >= 0;
-      const colorClass = isUp ? 'text-green-400' : 'text-red-400';
-      return (
-        <button
-          key={sym}
-          onClick={() => handleSymbolChange(sym, type)}
-          className={`w-full grid grid-cols-12 items-center px-3 py-2 rounded mb-0.5 transition-all outline-none group ${symbol === sym ? 'bg-[#2962FF]/10' : 'hover:bg-gray-800/40'}`}
-        >
-          <div className="col-span-4 text-left">
-            <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
-            <div className="text-[8px] text-gray-500 font-medium truncate mt-0.5">{sub}</div>
-          </div>
-          <div className="col-span-3 text-right">
-            <PriceHighlight price={ticker.lastPrice || 0} className="text-[11px] font-bold" />
-          </div>
-          <div className={`col-span-2 text-right text-[10px] font-medium ${colorClass}`}>
-            {ticker.priceChange ? (ticker.priceChange > 0 ? '+' : '') + ticker.priceChange.toFixed(2) : '0.00'}
-          </div>
-          <div className={`col-span-3 text-right text-[10px] font-bold ${colorClass}`}>
-            {ticker.priceChangePercent ? (ticker.priceChangePercent > 0 ? '+' : '') + ticker.priceChangePercent.toFixed(2) + '%' : '0.00%'}
-          </div>
-        </button>
-      );
-    })}
-  </>
 );

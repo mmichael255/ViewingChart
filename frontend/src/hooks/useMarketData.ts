@@ -46,46 +46,56 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             wsRef.current.close();
         }
 
-        const ws = new WebSocket(`${WS_URL}/market/ws/${symbol}/${interval}`);
-        wsRef.current = ws;
+        let reconnectTimeout: ReturnType<typeof setTimeout>;
 
-        ws.onopen = () => {
-            console.log(`Connected to WS for ${symbol}`);
+        const connectWS = () => {
+            const ws = new WebSocket(`${WS_URL}/market/ws/${symbol}/${interval}`);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                console.log(`Connected to WS for ${symbol}`);
+            };
+
+            ws.onmessage = (event) => {
+                const update: KlineData = JSON.parse(event.data);
+
+                setRealtimeData(currentData => {
+                    const baseData = currentData || initialDataRef.current;
+
+                    if (!baseData || baseData.length === 0) return currentData;
+
+                    const lastCandle = baseData[baseData.length - 1];
+
+                    if (lastCandle.time === update.time) {
+                        const newData = [...baseData];
+                        newData[newData.length - 1] = update;
+                        return newData;
+                    } else if (update.time > lastCandle.time) {
+                        return [...baseData, update];
+                    }
+
+                    return baseData;
+                });
+            };
+
+            ws.onerror = (err) => {
+                console.error(`WebSocket error for ${symbol}:`, err);
+            };
+
+            ws.onclose = () => {
+                console.log(`WebSocket closed for ${symbol}. Reconnecting in 3 seconds...`);
+                reconnectTimeout = setTimeout(connectWS, 3000);
+            };
         };
 
-        ws.onmessage = (event) => {
-            const update: KlineData = JSON.parse(event.data);
-
-            setRealtimeData(currentData => {
-                const baseData = currentData || initialDataRef.current;
-
-                // CRITICAL FIX: If historical REST data hasn't loaded yet, drop the WS tick to avoid
-                // freezing the entire chart state to a single 1-length candle array indefinitely.
-                if (!baseData || baseData.length === 0) return currentData;
-
-                const lastCandle = baseData[baseData.length - 1];
-
-                // If update time is same as last candle, update it (tick)
-                // If update time is newer, append it (new candle)
-                if (lastCandle.time === update.time) {
-                    const newData = [...baseData];
-                    newData[newData.length - 1] = update;
-                    return newData;
-                } else if (update.time > lastCandle.time) {
-                    return [...baseData, update];
-                }
-
-                return baseData;
-            });
-        };
-
-        ws.onerror = (err) => {
-            console.error("WebSocket error:", err);
-        };
+        connectWS();
 
         return () => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.close();
+            clearTimeout(reconnectTimeout);
+            if (wsRef.current) {
+                // Prevent auto-reconnect on legitimate unmount
+                wsRef.current.onclose = null;
+                wsRef.current.close();
             }
         };
     }, [symbol, interval, assetType]);

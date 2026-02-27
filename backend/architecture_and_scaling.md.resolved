@@ -1,0 +1,68 @@
+# Architecture & Scaling Guide (Deep Technical Spec)
+
+This document details the exact memory, network, and process flows of the `ViewingChart` system. It focuses on the transition from a monolithic ASGI app to a distributed, horizontally scalable microservice architecture.
+
+## 1. Current Core Mechanics (Monolithic Async)
+
+### A. The Polling Flow (REST APIs)
+Handles Stocks, FX, and Crypto fallbacks via 10-second front-end recursive polling (`setTimeout`).
+
+1. **Frontend Request**: The React hook initiates `GET /market/tickers?crypto_symbols=...&stock_symbols=...`.
+2. **ASGI Routing**: Uvicorn passes the request to the FastAPI core, reaching `router.get("/tickers")` in [market_data.py](file:///home/Sherk/code/ViewingChart/backend/app/routers/market_data.py). 
+3. **Service Dispatch**: The request is fanned out to `stock_service.get_quotes()` and `binance_service.get_ticker_24h()`.
+4. **Valkey/Redis Lookaside Cache**: 
+   - `redis.asyncio` checks Keys: e.g., `stock_quote:AAPL`.
+   - If a cache hit occurs, the raw JSON string is loaded directly from Valkey RAM and parsed, achieving sub-millisecond local latency.
+5. **Async Network I/O**:
+   - On a cache miss, `httpx.AsyncClient` opens an HTTP/2 or HTTP/1.1 connection to Yahoo Finance natively. 
+   - The Python `await` yields control back to the Uvicorn event loop (`asyncio`), allowing the single thread to serve hundreds of other incoming `/klines` or `/tickers` requests concurrently without blocking.
+   - For [yfinance](file:///home/Sherk/code/ViewingChart/backend/app/services/stock_service.py#248-274) methods that are strictly synchronous (blocking CPU), the calls are offloaded using `asyncio.to_thread()`, keeping the primary event loop completely unstalled.
+6. **Cache Hydration**: The fetched response is serialized to JSON and pushed to Valkey via `setex` (Set with Expiry), ensuring stale memory automatically purges via TTL.
+
+### B. The Real-Time Flow (WebSockets & Pub/Sub)
+Provides millisecond-latency streaming for Crypto K-lines and Tickers.
+
+1. **Ingestion Daemon**: `ConnectionManager.start_binance_stream()` runs as a standard `asyncio.Task` fired on app startup. It holds a persistent TLS WebSocket connection to Binance (`wss://stream.binance.com:9443/ws`).
+2. **Valkey Pub/Sub Egress**: 
+   - As frames stream in from Binance, the Daemon parses the JSON payloads.
+   - It fires `.publish("market:ticker", payload)` and `.publish("market:kline", payload)` directly into Valkey via the Python redis driver. 
+3. **Valkey Subscriber Daemon**: 
+   - A separate task, `ConnectionManager.redis_listener()`, subscribes strictly to those channels. 
+   - When Valkey broadcasts a message onto the bus, this loop intercepts it.
+4. **Local Fan-out**: The subscriber loop takes the Valkey payload and routes it memory-locally. For instance, if `BTCUSDT` updates, it checks `self.ticker_connections` (a Python list of raw `fastapi.WebSocket` objects) and calls `.send_json()` over the ASGI socket to the connected browsers.
+
+---
+
+## 2. Horizontal Scaling Roadmap
+
+To migrate from thousands of users to millions, the deployment topology must detach entirely from single-server state.
+
+### Phase 1: Uvicorn Worker Pools (Vertical Scale)
+**Problem**: Node workloads like Python are constrained by the Global Interpreter Lock (GIL). A single Uvicorn instance uses 1 CPU core.
+**Technical Solution**: 
+Deploy **Gunicorn** binding via ASGI workers:
+```bash
+gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+```
+This spawns 4 isolated processes. **Crucially**, because we moved the [cache](file:///home/Sherk/code/ViewingChart/backend/app/services/stock_service.py#283-295) and `Pub/Sub` into strictly external Valkey clusters, these 4 processes will safely share the same cached JSON data, and all 4 will simultaneously intercept Valkey broadcasts to natively push onto their distinct sets of connected WebSockets.
+
+### Phase 2: Dynamic Multiplexing (We are doing this now)
+**Problem**: The Binance Daemon connects via URL string (e.g., `/ws/btcusdt@ticker/ethusdt@ticker`). It is rigidly hardcoded to a few top pairs. 
+**Technical Solution**:
+1. Change the Binance Daemon to connect generically to `/ws`.
+2. Create an `asyncio.Queue` or a specific Valkey channel `system:binance_commands`.
+3. The Binance listener loop will leverage `asyncio.wait([ws.recv(), command_queue.get()], return_when=asyncio.FIRST_COMPLETED)`.
+4. When a user connects to `DOGEUSDT`, the connection issues a command to the queue. The Daemon intercepts it and shoots a JSON payload to Binance: `{"method": "SUBSCRIBE", "params": ["dogeusdt@kline_1m"], "id": 1}`.
+5. Binance acknowledges and dynamically hooks the stream into the active connection without a disconnect.
+
+### Phase 3: The Dedicated Feeder Microservice
+**Problem**: Under Phase 1, starting 4 Gunicorn workers means firing up **4 identical Binance Daemons**. This will result in 4 identical payloads being blasted into Valkey Pub/Sub simultaneously, causing massive race conditions, UI stuttering, and an immediate IP ban from Binance for connection spam.
+**Technical Solution**:
+1. Decouple [start_binance_stream()](file:///home/Sherk/code/ViewingChart/backend/app/services/websocket_manager.py#94-170) entirely out of FastAPI. 
+2. Construct a standalone microservice script (`market_feeder.py`). 
+3. Dockerize the infrastructure:
+   - `feeder` container runs `python market_feeder.py` (Strictly scaling=1).
+   - `api` container runs `gunicorn app.main:app` (Scales to infinity).
+   - [redis](file:///home/Sherk/code/ViewingChart/backend/app/services/websocket_manager.py#67-93) container runs `valkey`.
+4. The API workers **only** run the [redis_listener()](file:///home/Sherk/code/ViewingChart/backend/app/services/websocket_manager.py#67-93) and serve standard front-end websockets. 
+5. When API workers need a new symbol dynamically subscribed, they publish `{"symbol": "XRPUSDT"}` to a Valkey channel `feeder:commands`. The solitary `feeder` container listens, upgrades the Binance hook natively, and pipes the live data out to the Valkey cluster for the API swarms to consume.
