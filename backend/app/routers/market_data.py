@@ -14,12 +14,21 @@ async def startup_event():
     # Start Binance stream in background
     asyncio.create_task(manager.start_binance_stream())
 
+import json
+
 @router.websocket("/ws/tickers")
 async def websocket_tickers(websocket: WebSocket):
     await manager.connect_tickers(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("action") == "subscribe":
+                    symbols = msg.get("symbols", [])
+                    await manager.subscribe_tickers(websocket, symbols)
+            except Exception:
+                pass
     except WebSocketDisconnect:
         manager.disconnect_tickers(websocket)
 
@@ -38,10 +47,11 @@ async def get_klines(symbol: str, interval: str = "1d", asset_type: str = "crypt
     Get historical k-lines.
     asset_type: 'crypto' (Binance) or 'stock' (iTick)
     """
-    if asset_type == "stock":
-        data = stock_service.get_klines(symbol, interval=interval)
+    # Futures (XAU/XAG) are treated as crypto because Binance provides them
+    if asset_type == "stock" and not (symbol.startswith("XAU") or symbol.startswith("XAG")):
+        data = await stock_service.get_klines(symbol, interval=interval)
     else:
-        data = binance_service.get_klines(symbol, interval=interval, limit=1000)
+        data = await binance_service.get_klines(symbol, interval=interval, limit=1000)
         
     if not data:
         raise HTTPException(status_code=404, detail="Data not found or error fetching data")
@@ -59,14 +69,14 @@ async def get_tickers(crypto_symbols: str = "", stock_symbols: str = ""):
     if crypto_symbols:
         c_list = [s.strip() for s in crypto_symbols.split(",") if s.strip()]
         if c_list:
-            c_data = binance_service.get_ticker_24h(c_list)
+            c_data = await binance_service.get_ticker_24h(c_list)
             results.update(c_data)
             
     # Fetch Stock Quotes
     if stock_symbols:
         s_list = [s.strip() for s in stock_symbols.split(",") if s.strip()]
         if s_list:
-            s_data = stock_service.get_quotes(s_list)
+            s_data = await stock_service.get_quotes(s_list)
             results.update(s_data)
             
     return results
@@ -77,8 +87,17 @@ async def search_markets(query: str, asset_type: str = "crypto"):
     Search for market symbols by query string.
     """
     if asset_type == "crypto":
-        results = binance_service.search_symbols(query)
+        results = await binance_service.search_symbols(query)
         return results
     else:
-        # Stock search is currently unsupported/limited
-        return []
+        results = await stock_service.search_symbols(query)
+        return results
+
+@router.get("/popular")
+async def get_popular():
+    """
+    Get dynamic popular cryptos from Binance and trending stocks from Yahoo Finance.
+    """
+    crypto = await binance_service.get_popular_cryptos()
+    stocks = await stock_service.get_popular_stocks()
+    return {"crypto": crypto, "stock": stocks}

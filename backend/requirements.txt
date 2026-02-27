@@ -12,3 +12,6 @@ websockets
 cryptography
 pydantic
 pydantic-settings
+yfinance
+redis
+httpx
