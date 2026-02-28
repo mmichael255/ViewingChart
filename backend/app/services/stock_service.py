@@ -10,13 +10,18 @@ from app.config import settings
 class StockService:
     def __init__(self):
         self.alphavantage_api_key = settings.ALPHA_VANTAGE_API_KEY
+        self.alphavantage_base_url = settings.ALPHA_VANTAGE_BASE_URL
+        self.yahoo_search_url = settings.YAHOO_SEARCH_URL
+        self.yahoo_trending_url = settings.YAHOO_TRENDING_URL
         
         if not self.alphavantage_api_key or self.alphavantage_api_key == "demo":
             print("WARNING: ALPHAVANTAGE_API_KEY not properly configured in .env file")
             
         self.redis_client = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True)
-        self.cache_duration = 60 # seconds, slightly longer to avoid Alpha Vantage rate limits
-        self.search_cache_duration = 3600 # Cache searches for 1 hour
+        self.cache_duration = 60
+        self.search_cache_duration = 3600
+        # Shared HTTP client — reuse TCP connections
+        self.http_client = httpx.AsyncClient(timeout=15.0)
         
     def _is_alphavantage_symbol(self, symbol: str) -> bool:
         """
@@ -133,7 +138,7 @@ class StockService:
         av_interval = self._map_av_interval(interval)
         ftype, from_sym, to_sym = self._format_alphavantage_symbol(symbol)
         
-        url = "https://www.alphavantage.co/query"
+        url = self.alphavantage_base_url
         params = {"apikey": self.alphavantage_api_key}
         
         # API requires different functions based on interval
@@ -152,7 +157,7 @@ class StockService:
 
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=params)
+                response = await client.get(self.alphavantage_base_url, params=params)
                 response.raise_for_status()
                 data = response.json()
             
@@ -220,7 +225,7 @@ class StockService:
         if self._is_alphavantage_symbol(symbol):
             # Alpha Vantage Realtime FX
             ftype, from_sym, to_sym = self._format_alphavantage_symbol(symbol)
-            url = "https://www.alphavantage.co/query"
+            url = self.alphavantage_base_url
             params = {
                 "function": "CURRENCY_EXCHANGE_RATE",
                 "from_currency": from_sym,
@@ -245,12 +250,22 @@ class StockService:
             def fetch_yfinance_quote():
                 try:
                     ticker = yf.Ticker(symbol)
+                    last_price = None
+                    prev_close = None
                     
-                    try: # Fast info sometimes throws NoneType exceptions
-                        last_price = ticker.fast_info.last_price
-                        prev_close = ticker.fast_info.previous_close
+                    try:
+                        fi = ticker.fast_info
+                        if fi is not None:
+                            lp = getattr(fi, 'last_price', None)
+                            pc = getattr(fi, 'previous_close', None)
+                            if lp is not None and pc is not None:
+                                last_price = float(lp)
+                                prev_close = float(pc)
                     except Exception:
-                        # Fallback to fetching recent history
+                        pass
+                    
+                    # Fallback to recent history if fast_info failed
+                    if last_price is None or prev_close is None:
                         hist = ticker.history(period="5d")
                         if hist.empty:
                             return {}
@@ -310,7 +325,7 @@ class StockService:
             return json.loads(cached)
 
         try:
-            url = f"https://query2.finance.yahoo.com/v1/finance/search"
+            url = self.yahoo_search_url
             params = {"q": query, "quotesCount": 50, "newsCount": 0}
             headers = {"User-Agent": "Mozilla/5.0"}
             
@@ -349,7 +364,7 @@ class StockService:
             return json.loads(cached)
 
         try:
-            url = "https://query2.finance.yahoo.com/v1/finance/trending/US"
+            url = self.yahoo_trending_url
             headers = {"User-Agent": "Mozilla/5.0"}
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, headers=headers)

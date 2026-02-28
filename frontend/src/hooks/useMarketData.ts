@@ -18,9 +18,17 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         }
     );
 
-    // Fallback: If no realtime data yet, use SWR's initialData directly in the render cycle rather than syncing via effect
     const [realtimeData, setRealtimeData] = useState<KlineData[] | undefined>(undefined);
     const wsRef = useRef<WebSocket | null>(null);
+
+    // Refs to prevent stale closures in reconnect callbacks
+    const symbolRef = useRef(symbol);
+    const intervalRef = useRef(interval);
+    const assetTypeRef = useRef(assetType);
+
+    useEffect(() => { symbolRef.current = symbol; }, [symbol]);
+    useEffect(() => { intervalRef.current = interval; }, [interval]);
+    useEffect(() => { assetTypeRef.current = assetType; }, [assetType]);
 
     const initialDataRef = useRef<KlineData[]>([]);
     useEffect(() => {
@@ -47,13 +55,25 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         }
 
         let reconnectTimeout: ReturnType<typeof setTimeout>;
+        // Guard: if the effect has been cleaned up, don't reconnect
+        let cancelled = false;
 
         const connectWS = () => {
-            const ws = new WebSocket(`${WS_URL}/market/ws/${symbol}/${interval}`);
+            if (cancelled) return;
+
+            // Always read the latest symbol/interval from refs
+            const currentSymbol = symbolRef.current;
+            const currentInterval = intervalRef.current;
+            const currentAssetType = assetTypeRef.current;
+
+            // Don't reconnect if asset type changed away from crypto
+            if (currentAssetType !== 'crypto') return;
+
+            const ws = new WebSocket(`${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
             wsRef.current = ws;
 
             ws.onopen = () => {
-                console.log(`Connected to WS for ${symbol}`);
+                console.log(`Connected to WS for ${currentSymbol}`);
             };
 
             ws.onmessage = (event) => {
@@ -79,18 +99,21 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             };
 
             ws.onerror = (err) => {
-                console.error(`WebSocket error for ${symbol}:`, err);
+                console.error(`WebSocket error for ${currentSymbol}:`, err);
             };
 
             ws.onclose = () => {
-                console.log(`WebSocket closed for ${symbol}. Reconnecting in 3 seconds...`);
-                reconnectTimeout = setTimeout(connectWS, 3000);
+                if (!cancelled) {
+                    console.log(`WebSocket closed for ${currentSymbol}. Reconnecting in 3 seconds...`);
+                    reconnectTimeout = setTimeout(connectWS, 3000);
+                }
             };
         };
 
         connectWS();
 
         return () => {
+            cancelled = true;
             clearTimeout(reconnectTimeout);
             if (wsRef.current) {
                 // Prevent auto-reconnect on legitimate unmount
