@@ -1,20 +1,15 @@
+import json
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from app.services.binance_service import binance_service
 from app.services.stock_service import stock_service
 from app.services.websocket_manager import manager
-import asyncio
 
 router = APIRouter(
     prefix="/market",
     tags=["market"]
 )
 
-@router.on_event("startup")
-async def startup_event():
-    # Start Binance stream in background
-    asyncio.create_task(manager.start_binance_stream())
-
-import json
+# NOTE: Startup is now handled via lifespan in main.py (no more @router.on_event)
 
 @router.websocket("/ws/tickers")
 async def websocket_tickers(websocket: WebSocket):
@@ -83,21 +78,15 @@ async def get_tickers(crypto_symbols: str = "", stock_symbols: str = ""):
 
 @router.get("/search")
 async def search_markets(query: str, asset_type: str = "crypto"):
-    """
-    Search for market symbols by query string.
-    """
+    """Search for market symbols by query string."""
     if asset_type == "crypto":
-        results = await binance_service.search_symbols(query)
-        return results
+        return await binance_service.search_symbols(query)
     else:
-        results = await stock_service.search_symbols(query)
-        return results
+        return await stock_service.search_symbols(query)
 
 @router.get("/popular")
 async def get_popular():
-    """
-    Get dynamic popular cryptos from Binance and trending stocks from Yahoo Finance.
-    """
+    """Get dynamic popular cryptos from Binance and trending stocks from Yahoo Finance."""
     crypto = await binance_service.get_popular_cryptos()
     stocks = await stock_service.get_popular_stocks()
     return {"crypto": crypto, "stock": stocks}

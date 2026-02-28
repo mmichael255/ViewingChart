@@ -1,0 +1,40 @@
+# Redis Architecture in ViewingChart
+
+Redis is used in this application for two main purposes: **Distributed Caching** (to avoid hitting rate limits on external APIs) and **Pub/Sub Messaging** (to broadcast real-time market data across multiple backend instances).
+
+---
+
+## 1. Cached Keys (Data Storage)
+
+These keys load data from external APIs once and cache it with a Time-To-Live (TTL) to ensure the app is fast and doesn't get rate-limited.
+
+| Key Name | Data Type | TTL | Description & Contents |
+|----------|-----------|-----|------------------------|
+| `binance:symbols` | **String (JSON)** | 1 hour | Contains the master JSON array of **all** trading pairs pulled from both Binance Spot and Binance Futures `exchangeInfo` endpoints. Each object contains [symbol](file:///home/Sherk/code/ViewingChart/backend/app/services/websocket_manager.py#281-304), `baseAsset`, `quoteAsset`, and the `source` API. |
+| `binance:futures_list` | **Set** | 1 hour | A highly optimized lookup set containing the exact symbols available on Binance Futures (e.g., `BTCUSDT`, `TSLAUSDT`). Used by the stream router to quickly determine if a symbol has a futures market. |
+| `binance:spot_list` | **Set** | 1 hour | A companion to the futures list, containing the precise symbols available on Binance Spot. The stream router checks this *first*, so overlapping symbols (like `BTCUSDT`) prefer the Spot WebSocket. |
+| `binance:popular` | **String (JSON)** | 1 hour | A pre-filtered, sorted array of the ~50 most popular crypto pairs by trading volume. This powers the default dropdown list in the frontend Search bar before the user types anything. |
+
+---
+
+## 2. Pub / Sub Channels (Real-Time Communication)
+
+The FastAPI background task connects to Binance WebSockets and acts as a single producer. It pipes raw WebSocket data into Redis Pub/Sub channels. Local FastAPI routes (and potentially other servers) subscribe to these channels to push the data out to frontend clients.
+
+This decoupled architecture allows the system to scale horizontally: one server manages the Binance connection, while 10 different UI servers could push that data to users.
+
+### Data Channels (Binance → Redis → Users)
+
+| Channel Name | Flow | Payload Contents |
+|--------------|------|------------------|
+| `market:ticker` | Backend → Users | Broadcasts price updates for the Watchlist sidebar. Sent every time Binance sends a `!ticker@arr` update.<br><br>**Payload (JSON stringified object):**<br>`{ "BTCUSDT": { "lastPrice": 64120.5, "priceChange": 1400.0, "priceChangePercent": 2.2 } }` |
+| `market:kline` | Backend → Users | Broadcasts individual candlestick updates for the main chart, matched by symbol and interval.<br><br>**Payload (JSON):**<br>`{ "symbol": "btcusdt", "interval": "1d", "data": { "time": 1715817600, "open": 63000, "high": 65000, "low": 62000, "close": 64120.5, "volume": 12.5 } }` |
+
+### Command Channels (Users → Backend → Binance)
+
+When a frontend user clicks on a new chart or adds a symbol to their watchlist, the local server sends a command over Redis back to the master WebSocket manager to dynamically subscribe to that specific data stream on Binance.
+
+| Channel Name | Flow | Payload Contents |
+|--------------|------|------------------|
+| `market:cmd_kline_sub`| User → Backend | Triggered when a frontend user selects a new interval or symbol on the chart. Tells the WebSocket manager to issue a `SUBSCRIBE` command to Binance.<br><br>**Payload (JSON):**<br>`{"stream": "dogeusdt@kline_1h"}` |
+| `market:cmd_ticker_sub`| User → Backend | Triggered when a user opens the app or modifies their watchlist. Updates the `global_watchlist_syms` set so the backend knows which tickers to filter and forward from the massive `!ticker@arr` stream.<br><br>**Payload (JSON):**<br>`{"symbols": ["AAPL", "DOGEUSDT"]}` |

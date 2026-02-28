@@ -1,7 +1,21 @@
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="ViewingChart Backend")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: start background tasks on startup, clean up on shutdown."""
+    from app.services.websocket_manager import manager
+
+    task = asyncio.create_task(manager.start_binance_stream())
+    yield
+    manager.running = False
+    task.cancel()
+
+
+app = FastAPI(title="ViewingChart Backend", lifespan=lifespan)
 
 # Configure CORS for frontend access
 app.add_middleware(
