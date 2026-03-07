@@ -49,14 +49,17 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
     // Active UI Legend state prioritizes hover, falls back to static default
     const legendData = hoverLegendData || defaultLegendData;
 
-    // Memoize the format needed for the math utils (needs Open, High, Low, Close, Volume)
-    // We approximate it using just the candlestick data since lightweight-charts CandlestickData has open, high, low, close.
+    // Fix #5.2 — Track the indicator config signature so we only do a full rebuild
+    // when indicators are added/removed/reconfigured, NOT on every data tick.
+    const indicatorSignature = useMemo(() => {
+        return JSON.stringify(indicators.map(i => ({ id: i.id, params: i.params })));
+    }, [indicators]);
+
+    // Memoize the format needed for the math utils
     const klineDataForMath = useMemo<KlineData[]>(() => {
         if (!data || !Array.isArray(data)) return [];
         const mapped = data.map((d) => {
             const raw = d as unknown as { time: string | number; open: string | number; high: string | number; low: string | number; close: string | number; };
-            // Lightweight charts expects time as either a string 'YYYY-MM-DD' or a UNIX timestamp (seconds since epoch) as a number
-            // If it's a number, ensure it stays a number, if string, parse accordingly
             const timeValue = typeof raw.time === 'number' || !isNaN(Number(raw.time)) ?
                 (typeof raw.time === 'number' ? raw.time : Number(raw.time)) as Time :
                 String(raw.time) as Time;
@@ -67,12 +70,10 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                 high: Number(raw.high) || 0,
                 low: Number(raw.low) || 0,
                 close: Number(raw.close) || 0,
-                // Handle different possible API property names for volume
                 volume: Number((raw as any).volume || (raw as any).vol) || 0
             };
         });
 
-        // Filter out rows without valid timestamps to satisfy KlineData restrictions
         return mapped.filter(d =>
             d.time !== undefined &&
             d.time !== null &&
@@ -156,7 +157,9 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         }
     }, [data]);
 
-    // 2. Update Overlay Indicators
+    // 2. Build/Rebuild Overlay Indicators — Fix #5.2
+    // This effect only runs when indicators CONFIG changes (add/remove/param change).
+    // It builds the series once and stores references for incremental updates.
     useEffect(() => {
         if (!chartRef.current) return;
         const chart = chartRef.current;
@@ -169,31 +172,20 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         });
         indicatorSeriesRefs.current = {};
 
-        // --- Handle Overlays ---
+        // --- Pre-create series for each active overlay ---
         const activeMAs = indicators.filter(ind => ind.id === 'ma');
         const activeEMAs = indicators.filter(ind => ind.id === 'ema');
         const activeBoll = indicators.find(ind => ind.id === 'boll');
         const activeSar = indicators.find(ind => ind.id === 'sar');
 
-        const newDefaultLegend: any = {};
-        if (klineDataForMath && klineDataForMath.length > 0) {
-            const last = klineDataForMath[klineDataForMath.length - 1];
-            newDefaultLegend.time = String(last.time);
-            newDefaultLegend.open = last.open;
-            newDefaultLegend.high = last.high;
-            newDefaultLegend.low = last.low;
-            newDefaultLegend.close = last.close;
-        }
+        const maColors = ['#2962FF', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'];
+        const emaColors = ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#2962FF', '#FF6D00', '#00C853'];
 
         activeMAs.forEach((ma) => {
             const periods = Array.isArray(ma.params?.periods) ? ma.params.periods : [20];
             periods.forEach((p: number, pIdx: number) => {
-                const res = calculateSMA(klineDataForMath, p).filter(d => !isNaN(d.value));
-                if (res.length > 0) newDefaultLegend[`${ma.name}_${pIdx}`] = res[res.length - 1].value;
-                const colors = ['#2962FF', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'];
-                const color = colors[pIdx % colors.length];
+                const color = maColors[pIdx % maColors.length];
                 const series = chart.addSeries(LineSeries, { color, lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-                series.setData(res.map(d => ({ time: d.time as Time, value: d.value })));
                 if (!indicatorSeriesRefs.current[ma.id]) indicatorSeriesRefs.current[ma.id] = [];
                 indicatorSeriesRefs.current[ma.id].push(series);
             });
@@ -202,21 +194,79 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         activeEMAs.forEach((ema) => {
             const periods = Array.isArray(ema.params?.periods) ? ema.params.periods : [20];
             periods.forEach((p: number, pIdx: number) => {
-                const res = calculateEMA(klineDataForMath, p).filter(d => !isNaN(d.value));
-                if (res.length > 0) newDefaultLegend[`${ema.name}_${pIdx}`] = res[res.length - 1].value;
-                const colors = ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#2962FF', '#FF6D00', '#00C853'];
-                const color = colors[pIdx % colors.length];
+                const color = emaColors[pIdx % emaColors.length];
                 const series = chart.addSeries(LineSeries, { color, lineWidth: 1, crosshairMarkerVisible: false, lineStyle: 1, lastValueVisible: false, priceLineVisible: false });
-                series.setData(res.map(d => ({ time: d.time as Time, value: d.value })));
                 if (!indicatorSeriesRefs.current[ema.id]) indicatorSeriesRefs.current[ema.id] = [];
                 indicatorSeriesRefs.current[ema.id].push(series);
             });
         });
 
         if (activeBoll) {
+            const upper = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            const middle = chart.addSeries(LineSeries, { color: 'rgba(255, 255, 255, 0.4)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            const lower = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            indicatorSeriesRefs.current[activeBoll.id] = [upper, middle, lower];
+        }
+
+        if (activeSar) {
+            const series = chart.addSeries(LineSeries, { color: '#E91E63', lineWidth: 2, lineStyle: 3, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            indicatorSeriesRefs.current[activeSar.id] = [series];
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [indicatorSignature]);
+
+    // 2.5 Update indicator DATA — runs when data changes OR indicators change.
+    // This uses setData on existing series instead of destroying & recreating them.
+    useEffect(() => {
+        if (!chartRef.current || klineDataForMath.length === 0) return;
+
+        const activeMAs = indicators.filter(ind => ind.id === 'ma');
+        const activeEMAs = indicators.filter(ind => ind.id === 'ema');
+        const activeBoll = indicators.find(ind => ind.id === 'boll');
+        const activeSar = indicators.find(ind => ind.id === 'sar');
+
+        const newDefaultLegend: any = {};
+        if (klineDataForMath.length > 0) {
+            const last = klineDataForMath[klineDataForMath.length - 1];
+            newDefaultLegend.time = String(last.time);
+            newDefaultLegend.open = last.open;
+            newDefaultLegend.high = last.high;
+            newDefaultLegend.low = last.low;
+            newDefaultLegend.close = last.close;
+        }
+
+        // Update MA series data
+        activeMAs.forEach((ma) => {
+            const periods = Array.isArray(ma.params?.periods) ? ma.params.periods : [20];
+            const seriesList = indicatorSeriesRefs.current[ma.id] || [];
+            periods.forEach((p: number, pIdx: number) => {
+                if (seriesList[pIdx]) {
+                    const res = calculateSMA(klineDataForMath, p).filter(d => !isNaN(d.value));
+                    if (res.length > 0) newDefaultLegend[`${ma.name}_${pIdx}`] = res[res.length - 1].value;
+                    seriesList[pIdx].setData(res.map(d => ({ time: d.time as Time, value: d.value })));
+                }
+            });
+        });
+
+        // Update EMA series data
+        activeEMAs.forEach((ema) => {
+            const periods = Array.isArray(ema.params?.periods) ? ema.params.periods : [20];
+            const seriesList = indicatorSeriesRefs.current[ema.id] || [];
+            periods.forEach((p: number, pIdx: number) => {
+                if (seriesList[pIdx]) {
+                    const res = calculateEMA(klineDataForMath, p).filter(d => !isNaN(d.value));
+                    if (res.length > 0) newDefaultLegend[`${ema.name}_${pIdx}`] = res[res.length - 1].value;
+                    seriesList[pIdx].setData(res.map(d => ({ time: d.time as Time, value: d.value })));
+                }
+            });
+        });
+
+        // Update BOLL series data
+        if (activeBoll) {
             const p = (activeBoll.params?.period as number) || 20;
             const m = (activeBoll.params?.multiplier as number) || 2;
             const res = calculateBOLL(klineDataForMath, p, m);
+            const seriesList = indicatorSeriesRefs.current[activeBoll.id] || [];
 
             if (res.length > 0) {
                 const last = res[res.length - 1];
@@ -225,34 +275,25 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                 newDefaultLegend[`${activeBoll.name}_2`] = last.lower;
             }
 
-            const upper = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-            const middle = chart.addSeries(LineSeries, { color: 'rgba(255, 255, 255, 0.4)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-            const lower = chart.addSeries(LineSeries, { color: 'rgba(41, 98, 255, 0.5)', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-
-            upper.setData(res.filter(d => !isNaN(d.upper)).map(d => ({ time: d.time as Time, value: d.upper })));
-            middle.setData(res.filter(d => !isNaN(d.middle)).map(d => ({ time: d.time as Time, value: d.middle })));
-            lower.setData(res.filter(d => !isNaN(d.lower)).map(d => ({ time: d.time as Time, value: d.lower })));
-
-            indicatorSeriesRefs.current[activeBoll.id] = [upper, middle, lower];
+            if (seriesList[0]) seriesList[0].setData(res.filter(d => !isNaN(d.upper)).map(d => ({ time: d.time as Time, value: d.upper })));
+            if (seriesList[1]) seriesList[1].setData(res.filter(d => !isNaN(d.middle)).map(d => ({ time: d.time as Time, value: d.middle })));
+            if (seriesList[2]) seriesList[2].setData(res.filter(d => !isNaN(d.lower)).map(d => ({ time: d.time as Time, value: d.lower })));
         }
 
+        // Update SAR series data
         if (activeSar) {
             const step = (activeSar.params?.step as number) || 0.02;
             const maxStep = (activeSar.params?.maxStep as number) || 0.2;
             const res = calculateSAR(klineDataForMath, step, maxStep);
+            const seriesList = indicatorSeriesRefs.current[activeSar.id] || [];
 
             if (res.length > 0) newDefaultLegend[`${activeSar.name}_0`] = res[res.length - 1].value;
 
-            const series = chart.addSeries(LineSeries, { color: '#E91E63', lineWidth: 2, lineStyle: 3, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-            series.setData(res.filter(d => !isNaN(d.value)).map(d => ({ time: d.time as Time, value: d.value })));
-            indicatorSeriesRefs.current[activeSar.id] = [series];
+            if (seriesList[0]) seriesList[0].setData(res.filter(d => !isNaN(d.value)).map(d => ({ time: d.time as Time, value: d.value })));
         }
 
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setDefaultLegendData(newDefaultLegend);
-
-        // --- Handle Oscillators ---
-        // We only render overlays on the main chart now. Oscillators are handled by the `<OscillatorPane />` mapped in the JSX.
 
     }, [data, indicators, klineDataForMath]);
 
@@ -331,14 +372,12 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                     )}
 
                     {indicators.filter(i => i.type === 'overlay').map(ind => {
-                        // Gather whatever values were recorded for this indicator ID in the legend state
                         const vals = Object.keys(legendData)
                             .filter(k => k.startsWith(ind.name + '_'))
                             .map(k => legendData[k]);
 
                         if (vals.length === 0) return null;
 
-                        // Attempt to format the periods into the label if applicable
                         const periodArray = Array.isArray(ind.params?.periods) ? (ind.params?.periods as number[]) : [];
                         const titleLabel = periodArray.length > 0 ? `${ind.name} (${periodArray.join(', ')})` : ind.name;
 
@@ -367,7 +406,7 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                 />
             </div>
 
-            {/* Draw active oscillator panes underneath the main chart, passing the mainChart instance deeply so we can sync time scales. */}
+            {/* Draw active oscillator panes underneath the main chart */}
             {chartInstance && activeOscillators.map(osc => (
                 <OscillatorPane
                     key={osc.id}

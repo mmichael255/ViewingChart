@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import { useEffect, useState, useRef } from 'react';
@@ -24,41 +25,44 @@ export function WatchlistSidebar({
     const [tickers, setTickers] = useState<Record<string, any>>({});
     const wsRef = useRef<WebSocket | null>(null);
 
-    // Data Fetching Logic (Recursive Timeout to prevent simple interval overlap)
+    // Fix #5.3 — Only poll for STOCK symbols (no WS available for them).
+    // Crypto prices are handled entirely via WebSocket below.
     useEffect(() => {
+        if (stockWatchlist.length === 0) return;
+
         let timeoutId: number;
         let isActive = true;
 
-        const fetchTickers = async () => {
+        const fetchStockTickers = async () => {
             try {
-                const cryptos = cryptoWatchlist.map(i => i.sym).join(',');
                 const stocks = stockWatchlist.map(i => i.sym).join(',');
-                const res = await fetch(`${API_URL}/market/tickers?crypto_symbols=${cryptos}&stock_symbols=${stocks}`);
+                const res = await fetch(`${API_URL}/market/tickers?stock_symbols=${stocks}`);
                 const newData = await res.json();
                 if (isActive) {
                     setTickers(prev => ({ ...prev, ...newData }));
                 }
             } catch (err) {
-                console.error("Failed to fetch tickers:", err);
+                console.error("Failed to fetch stock tickers:", err);
             } finally {
                 if (isActive) {
-                    timeoutId = window.setTimeout(fetchTickers, 10000);
+                    timeoutId = window.setTimeout(fetchStockTickers, 10000);
                 }
             }
         };
 
-        fetchTickers();
+        fetchStockTickers();
 
         return () => {
             isActive = false;
             window.clearTimeout(timeoutId);
         };
-    }, [cryptoWatchlist, stockWatchlist]);
+    }, [stockWatchlist]);
 
-    // WebSocket sync for cryptos
+    // WebSocket sync for cryptos — Fix #3.4: exponential backoff
     useEffect(() => {
         let reconnectTimeout: ReturnType<typeof setTimeout>;
         let isUnmounted = false;
+        let reconnectAttempt = 0;
 
         const connectWS = () => {
             if (isUnmounted) return;
@@ -67,6 +71,7 @@ export function WatchlistSidebar({
             wsRef.current = socket;
 
             socket.onopen = () => {
+                reconnectAttempt = 0; // Reset backoff on success
                 socket.send(JSON.stringify({
                     action: 'subscribe',
                     symbols: cryptoWatchlist.map(i => i.sym)
@@ -86,8 +91,11 @@ export function WatchlistSidebar({
 
             socket.onclose = () => {
                 if (!isUnmounted) {
-                    console.log(`Watchlist WS closed. Reconnecting in 3 seconds...`);
-                    reconnectTimeout = setTimeout(connectWS, 3000);
+                    // Fix #3.4 — Exponential backoff: 3s, 6s, 12s, ..., max 30s
+                    const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
+                    reconnectAttempt++;
+                    console.log(`Watchlist WS closed. Reconnecting in ${delay / 1000}s...`);
+                    reconnectTimeout = setTimeout(connectWS, delay);
                 }
             };
         };

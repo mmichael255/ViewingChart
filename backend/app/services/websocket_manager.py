@@ -5,7 +5,7 @@ import websockets
 import redis.asyncio as redis
 from typing import List, Dict, Set
 from fastapi import WebSocket
-from app.config import settings
+from app.config import settings, get_redis, ws_id_counter
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,8 @@ class ConnectionManager:
 
         self.binance_ws_url = settings.BINANCE_WS_URL
         self.running = False
-        self.redis = redis.Redis(
-            host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True
-        )
+        # Shared Redis pool (Fix #2.1)
+        self.redis = get_redis()
         self.binance_spot_ws = None
         self.binance_futures_ws = None
         self.subscribed_streams: Set[str] = set()
@@ -34,6 +33,8 @@ class ConnectionManager:
         # Symbol lists, loaded once at startup
         self._futures_only_syms: Set[str] = set()
         self._spot_syms: Set[str] = set()
+        # Track which individual ticker streams are subscribed (Fix #3.3)
+        self._subscribed_ticker_streams: Dict[str, Set[str]] = {"spot": set(), "futures": set()}
 
     # ── Client connection management ──────────────────────────────────
 
@@ -64,7 +65,7 @@ class ConnectionManager:
             self._stream_refcount[stream_name] -= 1
             if self._stream_refcount[stream_name] <= 0:
                 del self._stream_refcount[stream_name]
-                # Unsubscribe from Binance if nobody is watching
+                # Unsubscribe from Binance if nobody is watching — awaited properly (Fix #3.2)
                 asyncio.ensure_future(self._unsubscribe_stream(stream_name))
 
         logger.info(f"Client disconnected from {key}")
@@ -82,7 +83,7 @@ class ConnectionManager:
                     payload = {
                         "method": "UNSUBSCRIBE",
                         "params": [stream_name],
-                        "id": len(self.subscribed_streams) + 100,
+                        "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
                     }
                     await ws.send(json.dumps(payload))
                     print(f"[{tag}] ❌ Dynamic Unsubscribe: {stream_name}")
@@ -104,10 +105,15 @@ class ConnectionManager:
         new_syms = set(self._default_watchlist_syms)
         for sub_set in self.ticker_subscriptions.values():
             new_syms.update(sub_set)
+
+        old_syms = self.global_watchlist_syms
         self.global_watchlist_syms = new_syms
 
-        if symbols:
-            await self.redis.publish("market:cmd_ticker_sub", json.dumps({"symbols": symbols}))
+        # Fix #3.3 — dynamically subscribe/unsubscribe per-symbol ticker streams
+        added = new_syms - old_syms
+        removed = old_syms - new_syms
+        if added or removed:
+            await self._update_ticker_streams(added, removed)
 
     def disconnect_tickers(self, websocket: WebSocket):
         if websocket in self.ticker_connections:
@@ -115,6 +121,58 @@ class ConnectionManager:
         if websocket in self.ticker_subscriptions:
             del self.ticker_subscriptions[websocket]
         logger.info("Client disconnected from global ticker stream")
+
+    # ── Per-symbol ticker stream management (Fix #3.3) ────────────────
+
+    async def _update_ticker_streams(self, added: Set[str], removed: Set[str]):
+        """Subscribe/unsubscribe individual <symbol>@ticker streams instead of !ticker@arr."""
+        for sym in added:
+            stream = f"{sym.lower()}@ticker"
+            is_spot = sym.lower() in self._spot_syms
+            tag = "SPOT" if is_spot else "FUTURES"
+            ws = self.binance_spot_ws if is_spot else self.binance_futures_ws
+            target_set = self._subscribed_ticker_streams["spot" if is_spot else "futures"]
+
+            if ws and stream not in target_set:
+                try:
+                    payload = {"method": "SUBSCRIBE", "params": [stream], "id": next(ws_id_counter)}
+                    await ws.send(json.dumps(payload))
+                    target_set.add(stream)
+                    logger.info(f"[{tag}] ✅ Ticker subscribe: {stream}")
+                except Exception as e:
+                    logger.error(f"Failed to subscribe ticker {stream}: {e}")
+
+        for sym in removed:
+            stream = f"{sym.lower()}@ticker"
+            is_spot = sym.lower() in self._spot_syms
+            tag = "SPOT" if is_spot else "FUTURES"
+            ws = self.binance_spot_ws if is_spot else self.binance_futures_ws
+            target_set = self._subscribed_ticker_streams["spot" if is_spot else "futures"]
+
+            if ws and stream in target_set:
+                try:
+                    payload = {"method": "UNSUBSCRIBE", "params": [stream], "id": next(ws_id_counter)}
+                    await ws.send(json.dumps(payload))
+                    target_set.discard(stream)
+                    logger.info(f"[{tag}] ❌ Ticker unsubscribe: {stream}")
+                except Exception as e:
+                    logger.error(f"Failed to unsubscribe ticker {stream}: {e}")
+
+    async def _subscribe_initial_ticker_streams(self):
+        """Subscribe the initial watchlist symbols as individual ticker streams."""
+        for sym in self.global_watchlist_syms:
+            stream = f"{sym.lower()}@ticker"
+            is_spot = sym.lower() in self._spot_syms
+            ws = self.binance_spot_ws if is_spot else self.binance_futures_ws
+            target_set = self._subscribed_ticker_streams["spot" if is_spot else "futures"]
+            if ws and stream not in target_set:
+                try:
+                    payload = {"method": "SUBSCRIBE", "params": [stream], "id": next(ws_id_counter)}
+                    await ws.send(json.dumps(payload))
+                    target_set.add(stream)
+                except Exception as e:
+                    logger.error(f"Failed initial ticker subscribe {stream}: {e}")
+        logger.info(f"Subscribed {len(self.global_watchlist_syms)} initial ticker streams")
 
     # ── Broadcasting ──────────────────────────────────────────────────
 
@@ -156,7 +214,6 @@ class ConnectionManager:
                     data = json.loads(message["data"])
 
                     if channel == "market:ticker":
-                        # print(f"📡 Broadcasting TICKER updates to clients ({len(data)} symbols)")
                         await self.broadcast_ticker(data)
 
                     elif channel == "market:kline":
@@ -177,7 +234,7 @@ class ConnectionManager:
                                 payload = {
                                     "method": "SUBSCRIBE",
                                     "params": [stream_name],
-                                    "id": len(self.subscribed_streams) + 1,
+                                    "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
                                 }
                                 try:
                                     await ws.send(json.dumps(payload))
@@ -194,7 +251,14 @@ class ConnectionManager:
                         new_syms.update(t.upper() for t in tickers)
                         for sub_set in self.ticker_subscriptions.values():
                             new_syms.update(sub_set)
+
+                        added = new_syms - self.global_watchlist_syms
+                        removed = self.global_watchlist_syms - new_syms
                         self.global_watchlist_syms = new_syms
+
+                        if added or removed:
+                            await self._update_ticker_streams(added, removed)
+
                         logger.info(f"Global watchlist updated: {len(self.global_watchlist_syms)} symbols tracked.")
 
         except asyncio.CancelledError:
@@ -230,14 +294,38 @@ class ConnectionManager:
                     else:
                         self.binance_futures_ws = ws
 
+                    # Subscribe initial ticker streams once connected (Fix #3.3)
+                    await self._subscribe_initial_ticker_streams()
+
                     msg_count = 0
                     while self.running:
-                        msg = await ws.recv()
+                        # Fix #3.1 — timeout on recv to detect zombie connections
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                        except asyncio.TimeoutError:
+                            logger.warning(f"[{tag}] No data received in 30s, reconnecting...")
+                            print(f"[{tag}] ⚠️  Zombie connection detected, reconnecting...")
+                            break  # exits inner loop; outer loop reconnects
+
                         raw_data = json.loads(msg)
                         data = raw_data.get("data", raw_data)
                         msg_count += 1
 
-                        # Handle ticker array (!ticker@arr)
+                        # Handle individual ticker updates (Fix #3.3 — <symbol>@ticker format)
+                        if isinstance(data, dict) and "e" in data and data["e"] == "24hrTicker":
+                            s = data["s"]
+                            if s in self.global_watchlist_syms:
+                                update = {
+                                    s: {
+                                        "lastPrice": float(data["c"]),
+                                        "priceChange": float(data["p"]),
+                                        "priceChangePercent": float(data["P"]),
+                                    }
+                                }
+                                await self.redis.publish("market:ticker", json.dumps(update))
+                            continue
+
+                        # Handle ticker array (!ticker@arr) — kept as fallback
                         if isinstance(data, list):
                             updates = {}
                             for item in data:
@@ -250,7 +338,6 @@ class ConnectionManager:
                                     }
                             if updates:
                                 await self.redis.publish("market:ticker", json.dumps(updates))
-                                # Log every 10th ticker batch to avoid spam
                                 if msg_count % 10 == 1:
                                     syms = list(updates.keys())[:5]
                                     print(f"[{tag}] 📊 Ticker update #{msg_count}: {syms} ({len(updates)} symbols)")
@@ -277,7 +364,6 @@ class ConnectionManager:
                                 "data": formatted_update,
                             }
                             await self.redis.publish("market:kline", json.dumps(payload))
-                            # Log every kline update as requested
                             print(f"[{tag}] 🕯️  Kline Fetched -> {symbol.upper()}@{interval}: open={formatted_update['open']} close={formatted_update['close']} vol={formatted_update['volume']}")
 
             except Exception as e:
@@ -303,7 +389,7 @@ class ConnectionManager:
                 print(f"[INIT] ❌ Failed to load symbol lists: {e}")
                 logger.error(f"Failed to load symbol lists from Redis: {e}")
             await asyncio.sleep(2)
-        
+
         # Hardcoded fallback for known symbols
         self._futures_only_syms = {"xauusdt", "xagusdt"}
         self._spot_syms = {"btcusdt", "ethusdt", "solusdt"}
@@ -326,21 +412,28 @@ class ConnectionManager:
         spot_ws_base = self.binance_ws_url.replace("/ws", "")
         futures_ws_base = settings.BINANCE_FUTURES_WS_URL
 
-        # Start light: just subscribe to the ticker array
-        self.subscribed_streams.add("!ticker@arr")
-
-        # Split streams between spot and futures
-        spot_streams = ["!ticker@arr"]
-        futures_streams = ["!ticker@arr"]
+        # Fix #3.3 — Start light with NO !ticker@arr; individual ticker streams
+        # are subscribed dynamically after connection via _subscribe_initial_ticker_streams()
+        spot_streams: List[str] = []
+        futures_streams: List[str] = []
 
         for s in self.subscribed_streams:
-            if s == "!ticker@arr":
-                continue
             base_sym = s.split("@")[0].lower()
             if base_sym in self._spot_syms:
                 spot_streams.append(s)
             else:
                 futures_streams.append(s)
+
+        # Need at least one stream for the initial connection URL to be valid;
+        # use a single default kline stream as a seed if nothing else is subscribed
+        if not spot_streams:
+            seed = "btcusdt@kline_1d"
+            spot_streams.append(seed)
+            self.subscribed_streams.add(seed)
+        if not futures_streams:
+            seed = "xauusdt@kline_1d"
+            futures_streams.append(seed)
+            self.subscribed_streams.add(seed)
 
         print(f"[INIT] Spot streams: {len(spot_streams)} | Futures streams: {len(futures_streams)}")
 
