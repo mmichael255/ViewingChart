@@ -3,7 +3,8 @@ import json
 import logging
 import redis.asyncio as redis
 from typing import List, Dict, Any
-from app.config import settings
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from app.config import settings, get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -12,15 +13,30 @@ class BinanceService:
     BASE_URL = settings.BINANCE_API_URL
 
     def __init__(self):
-        # Connect to Valkey/Redis
-        self.redis_client = redis.Redis(
-            host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True
-        )
+        # Shared Redis pool (Fix #2.1)
+        self.redis_client = get_redis()
         self.cache_duration = 3600  # 1 hour
         # Shared HTTP client — reuse TCP connections across all API calls
         self.http_client = httpx.AsyncClient(timeout=15.0)
         # In-memory cache of spot symbol names (rebuilt on exchange info fetch)
         self._spot_names_cache: set = set()
+
+    async def close(self):
+        """Gracefully close the HTTP client (Fix #1.2)."""
+        await self.http_client.aclose()
+
+    # ── Retry wrapper (Fix #1.3) ──
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, max=10),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)),
+        reraise=True,
+    )
+    async def _fetch_json(self, url: str, params: dict | None = None) -> Any:
+        """HTTP GET with automatic retry + exponential backoff."""
+        response = await self.http_client.get(url, params=params or {})
+        response.raise_for_status()
+        return response.json()
 
     async def _fetch_exchange_info(self) -> List[Dict[str, str]]:
         """Fetch and cache trading pairs from Binance exchange info (Spot + Futures)."""
@@ -30,28 +46,31 @@ class BinanceService:
             # Rebuild in-memory spot names from cache
             if not self._spot_names_cache:
                 self._spot_names_cache = {s["symbol"] for s in symbols if s.get("source") == "Binance"}
-            # Ensure futures_list set also exists (it may have expired independently)
-            lists_exist = await self.redis_client.exists("binance:futures_list") and await self.redis_client.exists("binance:spot_list")
-            if not lists_exist:
+
+            # Atomically check both sets exist (Fix #2.3 — single pipeline)
+            pipe = self.redis_client.pipeline()
+            pipe.exists("binance:futures_list")
+            pipe.exists("binance:spot_list")
+            exists_results = await pipe.execute()
+            if not all(exists_results):
                 futures_names = [s["symbol"] for s in symbols if s.get("source") == "Binance Futures"]
                 spot_names_list = [s["symbol"] for s in symbols if s.get("source") == "Binance"]
-                if futures_names or spot_names_list:
-                    pipe = self.redis_client.pipeline()
-                    if futures_names:
-                        pipe.sadd("binance:futures_list", *futures_names)
-                        pipe.expire("binance:futures_list", self.cache_duration)
-                    if spot_names_list:
-                        pipe.sadd("binance:spot_list", *spot_names_list)
-                        pipe.expire("binance:spot_list", self.cache_duration)
-                    await pipe.execute()
-                    logger.info(f"Rebuilt binance:futures_list and binance:spot_list from cache")
+                rebuild_pipe = self.redis_client.pipeline()
+                if futures_names:
+                    rebuild_pipe.delete("binance:futures_list")
+                    rebuild_pipe.sadd("binance:futures_list", *futures_names)
+                    rebuild_pipe.expire("binance:futures_list", self.cache_duration)
+                if spot_names_list:
+                    rebuild_pipe.delete("binance:spot_list")
+                    rebuild_pipe.sadd("binance:spot_list", *spot_names_list)
+                    rebuild_pipe.expire("binance:spot_list", self.cache_duration)
+                await rebuild_pipe.execute()
+                logger.info("Rebuilt binance:futures_list and binance:spot_list from cache")
             return symbols
 
         try:
-            # 1. Fetch Spot
-            spot_res = await self.http_client.get(f"{self.BASE_URL}/exchangeInfo")
-            spot_res.raise_for_status()
-            spot_data = spot_res.json()
+            # 1. Fetch Spot (with retry — Fix #1.3)
+            spot_data = await self._fetch_json(f"{self.BASE_URL}/exchangeInfo")
 
             symbols = []
             spot_symbol_names = set()
@@ -69,10 +88,8 @@ class BinanceService:
 
             self._spot_names_cache = spot_symbol_names
 
-            # 2. Fetch Futures
-            fut_res = await self.http_client.get(f"{settings.BINANCE_FUTURES_API_URL}/exchangeInfo")
-            fut_res.raise_for_status()
-            fut_data = fut_res.json()
+            # 2. Fetch Futures (with retry)
+            fut_data = await self._fetch_json(f"{settings.BINANCE_FUTURES_API_URL}/exchangeInfo")
 
             futures_symbol_names = []
             for symbol_info in fut_data.get("symbols", []):
@@ -148,9 +165,8 @@ class BinanceService:
             return json.loads(cached)
 
         try:
-            res = await self.http_client.get(f"{self.BASE_URL}/ticker/24hr")
-            res.raise_for_status()
-            data = res.json()
+            # Fix #1.3 — retry wrapper
+            data = await self._fetch_json(f"{self.BASE_URL}/ticker/24hr")
 
             # Filter USDT pairs
             usdt_pairs = [
@@ -186,8 +202,14 @@ class BinanceService:
             return []
 
     async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> List[Dict[str, Any]]:
-        """Fetch K-line data from Binance."""
+        """Fetch K-line data from Binance with Redis caching (Fix #2.2)."""
         symbol = symbol.upper()
+
+        # ── Check Redis cache first ──
+        cache_key = f"klines:binance:{symbol}:{interval}:{limit}"
+        cached = await self.redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
 
         # Efficiently check if this is a futures-only symbol using cached set
         if await self._is_futures_only(symbol):
@@ -202,9 +224,8 @@ class BinanceService:
         }
 
         try:
-            response = await self.http_client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
+            # Fix #1.3 — retry wrapper
+            data = await self._fetch_json(url, params)
 
             formatted_data = []
             for candle in data:
@@ -217,6 +238,11 @@ class BinanceService:
                     "volume": float(candle[5]),
                 })
 
+            # ── Cache with interval-aware TTL (Fix #2.2) ──
+            ttl_map = {"1m": 5, "3m": 10, "5m": 15, "15m": 30, "30m": 60, "1h": 60, "4h": 120}
+            ttl = ttl_map.get(interval, 300)  # default 5 min for daily+
+            await self.redis_client.setex(cache_key, ttl, json.dumps(formatted_data))
+
             return formatted_data
 
         except Exception as e:
@@ -228,19 +254,20 @@ class BinanceService:
         if not symbols:
             return {}
 
-        # Build spot name set once for efficient lookup
+        # Build spot name set once for efficient lookup (Fix #4.1)
         if not self._spot_names_cache:
             await self._fetch_exchange_info()
 
+        # ── Single in-memory classification instead of per-symbol Redis calls (Fix #4.1) ──
         spot_symbols = []
         futures_symbols = []
 
         for s in symbols:
             s_upper = s.upper()
-            if await self._is_futures_only(s_upper):
-                futures_symbols.append(s_upper)
-            else:
+            if s_upper in self._spot_names_cache:
                 spot_symbols.append(s_upper)
+            else:
+                futures_symbols.append(s_upper)
 
         result = {}
 
@@ -249,9 +276,8 @@ class BinanceService:
             try:
                 spot_str = json.dumps(spot_symbols, separators=(",", ":"))
                 url = f"{self.BASE_URL}/ticker/24hr"
-                response = await self.http_client.get(url, params={"symbols": spot_str})
-                response.raise_for_status()
-                for ticker in response.json():
+                data = await self._fetch_json(url, {"symbols": spot_str})
+                for ticker in data:
                     sym = ticker["symbol"].upper()
                     result[sym] = {
                         "lastPrice": float(ticker["lastPrice"]),
@@ -266,9 +292,8 @@ class BinanceService:
             try:
                 fut_str = json.dumps(futures_symbols, separators=(",", ":"))
                 url = f"{settings.BINANCE_FUTURES_API_URL}/ticker/24hr"
-                response = await self.http_client.get(url, params={"symbols": fut_str})
-                response.raise_for_status()
-                for ticker in response.json():
+                data = await self._fetch_json(url, {"symbols": fut_str})
+                for ticker in data:
                     sym = ticker["symbol"].upper()
                     result[sym] = {
                         "lastPrice": float(ticker["lastPrice"]),

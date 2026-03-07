@@ -1,4 +1,6 @@
 import os
+import itertools
+import redis.asyncio as redis
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -21,3 +23,20 @@ class Settings:
 
 
 settings = Settings()
+
+# ── Shared Redis connection pool (Fix #2.1) ──
+# All services share the same pool instead of opening independent connections.
+redis_pool = redis.ConnectionPool(
+    host=settings.REDIS_HOST,
+    port=settings.REDIS_PORT,
+    db=0,
+    decode_responses=True,
+    max_connections=20,
+)
+
+def get_redis() -> redis.Redis:
+    """Return a Redis client backed by the shared pool."""
+    return redis.Redis(connection_pool=redis_pool)
+
+# ── Global monotonic ID counter for WS subscribe/unsubscribe (Fix #3.2) ──
+ws_id_counter = itertools.count(1)

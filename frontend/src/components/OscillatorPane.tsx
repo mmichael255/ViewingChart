@@ -2,7 +2,7 @@
 "use client";
 
 import { createChart, ColorType, IChartApi, ISeriesApi, Time, HistogramSeries, LineSeries } from 'lightweight-charts';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import type { IndicatorConfig } from './IndicatorBar';
 import { calculateMACD, calculateRSI, calculateKDJ } from '../utils/indicators';
 import type { KlineData } from '@/types/market';
@@ -27,6 +27,10 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
     const [defaultLegendData, setDefaultLegendData] = useState<any>({});
 
     const activeLegendData = hoverLegendData || defaultLegendData;
+
+    // Fix #5.4 — Build O(1) lookup maps for crosshair queries
+    // Maps: Time -> array of values (one per series)
+    const dataLookupRef = useRef<Map<any, number[]>>(new Map());
 
     // 1. Initialize Chart Instance
     useEffect(() => {
@@ -62,10 +66,8 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
         observer.observe(container);
 
         // Local Crosshair Move
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const handleLocalCrosshair = (param: any) => {
             if (param.time) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 const series = (mainChart as any)?.series ? (mainChart as any).series()[0] : undefined;
                 if (series && mainChart) mainChart.setCrosshairPosition(0, param.time, series);
             } else {
@@ -75,14 +77,17 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
             if (!param.time || param.point === undefined || param.point.x < 0 || param.point.y < 0) {
                 setHoverLegendData(null);
             } else {
-                const newLegend: any = {};
-                seriesRefs.current.forEach((s, idx) => {
-                    const val = param.seriesData.get(s) as any;
-                    if (val !== undefined) {
-                        newLegend[`val_${idx}`] = typeof val === 'object' && val !== null ? val.value : val;
-                    }
-                });
-                setHoverLegendData(newLegend);
+                // Fix #5.4 — O(1) lookup instead of linear scan
+                const vals = dataLookupRef.current.get(param.time);
+                if (vals) {
+                    const newLegend: any = {};
+                    vals.forEach((v, idx) => {
+                        newLegend[`val_${idx}`] = v;
+                    });
+                    setHoverLegendData(newLegend);
+                } else {
+                    setHoverLegendData(null);
+                }
             }
         };
 
@@ -103,29 +108,26 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
 
         const handleSyncZoom = (range: any) => { if (range) chart.timeScale().setVisibleLogicalRange(range); };
 
-        // Immediately sync the oscillator to the main chart's current zoom on initialization
-        // so it doesn't default to .fitContent() and look disconnected before the user drags.
         const currentRange = mainChart.timeScale().getVisibleLogicalRange();
         if (currentRange) handleSyncZoom(currentRange);
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const handleMainCrosshairMove = (param: any) => {
             if (param.time) {
                 const price = param.point?.y || 0;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 const series = (chart as any).series ? (chart as any).series()[0] : undefined;
                 if (series) chart.setCrosshairPosition(price, param.time, series);
 
-                // Set local hover legend reading directly from local series' active memory via .data() match
-                const newLegend: any = {};
-                seriesRefs.current.forEach((s, i) => {
-                    const dataVec = s.data();
-                    const match = dataVec.find((d: any) => d.time === param.time) as any;
-                    if (match) {
-                        newLegend[`val_${i}`] = match.value !== undefined ? match.value : match;
-                    }
-                });
-                setHoverLegendData(newLegend);
+                // Fix #5.4 — O(1) lookup from pre-built map
+                const vals = dataLookupRef.current.get(param.time);
+                if (vals) {
+                    const newLegend: any = {};
+                    vals.forEach((v, i) => {
+                        newLegend[`val_${i}`] = v;
+                    });
+                    setHoverLegendData(newLegend);
+                } else {
+                    setHoverLegendData(null);
+                }
             } else {
                 chart.clearCrosshairPosition();
                 setHoverLegendData(null);
@@ -153,6 +155,8 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
         seriesRefs.current = [];
 
         const newDefaultLegend: any = {};
+        // Fix #5.4 — Build the lookup map during data processing
+        const newLookup = new Map<any, number[]>();
 
         if (indicator.id === 'volume') {
             const volSeries = chart.addSeries(HistogramSeries, {
@@ -164,6 +168,10 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
                 volSeries.setData(volumeData);
                 const last = volumeData[volumeData.length - 1];
                 if (last) newDefaultLegend['val_0'] = last.value;
+                // Build lookup
+                volumeData.forEach(d => {
+                    newLookup.set(d.time, [d.value]);
+                });
             }
             seriesRefs.current = [volSeries];
         }
@@ -192,6 +200,13 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
                 color: d.histogram >= 0 ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
             })));
             seriesRefs.current = [macdSeries, signalSeries, histSeries];
+
+            // Build lookup
+            res.forEach(d => {
+                if (!isNaN(d.macd)) {
+                    newLookup.set(d.time, [d.macd, d.signal, d.histogram]);
+                }
+            });
         }
         else if (indicator.id === 'rsi') {
             const p = (indicator.params?.period as number) || 14;
@@ -202,6 +217,13 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
             const rsiSeries = chart.addSeries(LineSeries, { color: '#9C27B0', lineWidth: 2, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
             rsiSeries.setData(res.filter(d => !isNaN(d.value)).map(d => ({ time: d.time as Time, value: d.value })));
             seriesRefs.current = [rsiSeries];
+
+            // Build lookup
+            res.forEach(d => {
+                if (!isNaN(d.value)) {
+                    newLookup.set(d.time, [d.value]);
+                }
+            });
         }
         else if (indicator.id === 'kdj') {
             const n = (indicator.params?.n as number) || 9;
@@ -224,7 +246,17 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
             dSeries.setData(res.filter(d => !isNaN(d.d)).map(d => ({ time: d.time as Time, value: d.d })));
             jSeries.setData(res.filter(d => !isNaN(d.j)).map(d => ({ time: d.time as Time, value: d.j })));
             seriesRefs.current = [kSeries, dSeries, jSeries];
+
+            // Build lookup
+            res.forEach(d => {
+                if (!isNaN(d.k)) {
+                    newLookup.set(d.time, [d.k, d.d, d.j]);
+                }
+            });
         }
+
+        // Assign the lookup map for O(1) crosshair access
+        dataLookupRef.current = newLookup;
 
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setDefaultLegendData(newDefaultLegend);

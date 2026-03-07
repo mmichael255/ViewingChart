@@ -8,11 +8,16 @@ from fastapi.middleware.cors import CORSMiddleware
 async def lifespan(app: FastAPI):
     """Application lifespan: start background tasks on startup, clean up on shutdown."""
     from app.services.websocket_manager import manager
+    from app.services.binance_service import binance_service
+    from app.services.stock_service import stock_service
 
     task = asyncio.create_task(manager.start_binance_stream())
     yield
+    # Graceful shutdown (Fix #1.2)
     manager.running = False
     task.cancel()
+    await binance_service.close()
+    await stock_service.close()
 
 
 app = FastAPI(title="ViewingChart Backend", lifespan=lifespan)

@@ -1,6 +1,6 @@
 import useSWR from 'swr';
 import { Time } from 'lightweight-charts';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { API_URL, WS_URL } from '@/config';
 import type { KlineData } from '@/types/market';
 
@@ -45,6 +45,47 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         initialDataRef.current = []; // CRITICAL FIX: explicit wipe of stale history on symbol change
     }, [symbol, interval, assetType]);
 
+    // ── Fix #5.1 — Batch WS updates via requestAnimationFrame ──
+    // Instead of calling setRealtimeData on every WS message (1–2 Hz),
+    // we buffer the latest update in a ref and flush once per animation frame.
+    const pendingUpdateRef = useRef<KlineData | null>(null);
+    const rafIdRef = useRef<number>(0);
+
+    const applyUpdate = useCallback((currentData: KlineData[] | undefined, update: KlineData): KlineData[] | undefined => {
+        const baseData = currentData || initialDataRef.current;
+        if (!baseData || baseData.length === 0) return currentData;
+
+        const lastCandle = baseData[baseData.length - 1];
+
+        if (lastCandle.time === update.time) {
+            // Update existing candle in-place (shallow copy only the array, reuse all other objects)
+            const newData = baseData.slice();
+            newData[newData.length - 1] = update;
+            return newData;
+        } else if (update.time > lastCandle.time) {
+            return [...baseData, update];
+        }
+
+        return baseData;
+    }, []);
+
+    useEffect(() => {
+        // Animation frame loop: flush pending WS updates at screen refresh rate
+        const tick = () => {
+            const update = pendingUpdateRef.current;
+            if (update) {
+                pendingUpdateRef.current = null;
+                setRealtimeData(prev => applyUpdate(prev, update));
+            }
+            rafIdRef.current = requestAnimationFrame(tick);
+        };
+        rafIdRef.current = requestAnimationFrame(tick);
+
+        return () => {
+            cancelAnimationFrame(rafIdRef.current);
+        };
+    }, [applyUpdate]);
+
     // WebSocket logic for Crypto
     useEffect(() => {
         if (assetType !== 'crypto' || !symbol) return;
@@ -57,6 +98,8 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         let reconnectTimeout: ReturnType<typeof setTimeout>;
         // Guard: if the effect has been cleaned up, don't reconnect
         let cancelled = false;
+        // Fix #3.4 — Exponential backoff for WS reconnect
+        let reconnectAttempt = 0;
 
         const connectWS = () => {
             if (cancelled) return;
@@ -74,28 +117,12 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
             ws.onopen = () => {
                 console.log(`Connected to WS for ${currentSymbol}`);
+                reconnectAttempt = 0; // Reset backoff on successful connection
             };
 
             ws.onmessage = (event) => {
-                const update: KlineData = JSON.parse(event.data);
-
-                setRealtimeData(currentData => {
-                    const baseData = currentData || initialDataRef.current;
-
-                    if (!baseData || baseData.length === 0) return currentData;
-
-                    const lastCandle = baseData[baseData.length - 1];
-
-                    if (lastCandle.time === update.time) {
-                        const newData = [...baseData];
-                        newData[newData.length - 1] = update;
-                        return newData;
-                    } else if (update.time > lastCandle.time) {
-                        return [...baseData, update];
-                    }
-
-                    return baseData;
-                });
+                // Fix #5.1 — Buffer update instead of immediate setState
+                pendingUpdateRef.current = JSON.parse(event.data);
             };
 
             ws.onerror = (err) => {
@@ -104,8 +131,11 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
             ws.onclose = () => {
                 if (!cancelled) {
-                    console.log(`WebSocket closed for ${currentSymbol}. Reconnecting in 3 seconds...`);
-                    reconnectTimeout = setTimeout(connectWS, 3000);
+                    // Fix #3.4 — Exponential backoff: 3s, 6s, 12s, ..., max 30s
+                    const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
+                    reconnectAttempt++;
+                    console.log(`WebSocket closed for ${currentSymbol}. Reconnecting in ${delay / 1000}s...`);
+                    reconnectTimeout = setTimeout(connectWS, delay);
                 }
             };
         };

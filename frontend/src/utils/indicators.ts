@@ -1,18 +1,22 @@
 import type { KlineData } from '@/types/market';
 
-// 1. Simple Moving Average (SMA)
+// 1. Simple Moving Average (SMA) — Fix #6.2: sliding window O(n) instead of O(n × period)
 export function calculateSMA(data: KlineData[], period: number) {
     const result = [];
+    let windowSum = 0;
+
     for (let i = 0; i < data.length; i++) {
-        if (i < period - 1) {
+        windowSum += data[i].close;
+
+        if (i >= period) {
+            windowSum -= data[i - period].close;
+        }
+
+        if (i >= period - 1) {
+            result.push({ time: data[i].time, value: windowSum / period });
+        } else {
             result.push({ time: data[i].time, value: NaN });
-            continue;
         }
-        let sum = 0;
-        for (let j = 0; j < period; j++) {
-            sum += data[i - j].close;
-        }
-        result.push({ time: data[i].time, value: sum / period });
     }
     return result;
 }
@@ -34,26 +38,32 @@ export function calculateEMA(data: KlineData[], period: number) {
     return result;
 }
 
-// 3. Bollinger Bands (BOLL)
+// 3. Bollinger Bands (BOLL) — Fix #6.1: rolling sum + sum-of-squares for O(n)
 export function calculateBOLL(data: KlineData[], period: number = 20, multiplier: number = 2) {
     const result = [];
+    let windowSum = 0;
+    let windowSumSq = 0;
+
     for (let i = 0; i < data.length; i++) {
+        const c = data[i].close;
+        windowSum += c;
+        windowSumSq += c * c;
+
+        if (i >= period) {
+            const old = data[i - period].close;
+            windowSum -= old;
+            windowSumSq -= old * old;
+        }
+
         if (i < period - 1) {
             result.push({ time: data[i].time, upper: NaN, middle: NaN, lower: NaN });
             continue;
         }
 
-        let sum = 0;
-        for (let j = 0; j < period; j++) {
-            sum += data[i - j].close;
-        }
-        const middle = sum / period;
-
-        let variance = 0;
-        for (let j = 0; j < period; j++) {
-            variance += Math.pow(data[i - j].close - middle, 2);
-        }
-        const stdDev = Math.sqrt(variance / period);
+        const middle = windowSum / period;
+        // Variance = E[x²] - (E[x])²
+        const variance = (windowSumSq / period) - (middle * middle);
+        const stdDev = Math.sqrt(Math.max(0, variance)); // clamp to avoid sqrt of negative from float rounding
 
         result.push({
             time: data[i].time,
