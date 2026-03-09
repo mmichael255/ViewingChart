@@ -1,5 +1,8 @@
+import logging
 from fastapi import APIRouter, HTTPException
 from app.services.news_service import news_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/news",

@@ -1,7 +1,10 @@
+import logging
 import requests
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class NewsService:
     RSS_FEEDS = [
@@ -30,7 +33,7 @@ class NewsService:
                             "sentiment": "Neutral" # Placeholder for AI sentiment analysis
                         })
             except Exception as e:
-                print(f"Error fetching RSS from {feed['source']}: {e}")
+                logger.error(f"Error fetching RSS from {feed['source']}: {e}")
 
         # Mock Social Data (since we don't have API keys)
         news_items.append({

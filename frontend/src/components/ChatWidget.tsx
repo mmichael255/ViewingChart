@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { MessageCircle, X, Send } from "lucide-react";
 import type { KlineData } from '@/types/market';
+import { API_URL } from '@/config';
 import clsx from "clsx";
 
 interface Message {
@@ -45,7 +46,7 @@ export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
       // Use last 50 candles for context
       const context = chartData ? chartData.slice(-50) : [];
 
-      const res = await fetch("http://localhost:8000/chat", {
+      const res = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
