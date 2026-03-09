@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { API_URL } from '@/config';
 
 interface SymbolSearchProps {
     onSelect: (symbol: string, type: string, source?: string) => void;
@@ -86,7 +87,7 @@ export function SymbolSearch({ onSelect, placeholder = "Search symbol...", class
     const [popularData, setPopularData] = useState<{ crypto: any[], stock: any[] }>({ crypto: POPULAR_CRYPTO, stock: POPULAR_STOCKS });
 
     useEffect(() => {
-        fetch('http://localhost:8000/market/popular')
+        fetch(`${API_URL}/market/popular`)
             .then(res => res.json())
             .then(data => {
                 if (data.crypto && data.stock) {
@@ -113,7 +114,7 @@ export function SymbolSearch({ onSelect, placeholder = "Search symbol...", class
             setVisibleCount(20);
             setIsLoading(true);
             try {
-                const res = await fetch(`http://localhost:8000/market/search?query=${query}&asset_type=${assetType}&limit=50`);
+                const res = await fetch(`${API_URL}/market/search?query=${query}&asset_type=${assetType}&limit=50`);
                 const data = await res.json();
                 if (active) setResults(data);
             } catch (err) {

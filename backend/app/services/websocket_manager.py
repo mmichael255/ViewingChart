@@ -86,7 +86,7 @@ class ConnectionManager:
                         "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
                     }
                     await ws.send(json.dumps(payload))
-                    print(f"[{tag}] ❌ Dynamic Unsubscribe: {stream_name}")
+                    logger.info(f"[{tag}] Dynamic Unsubscribe: {stream_name}")
                     logger.info(f"Unsubscribed from Binance WS: {stream_name}")
                 except Exception as e:
                     logger.error(f"Failed to unsubscribe {stream_name}: {e}")
@@ -220,7 +220,7 @@ class ConnectionManager:
                         symbol = data["symbol"]
                         interval = data["interval"]
                         update = data["data"]
-                        print(f"📡 Broadcasting KLINE to clients -> {symbol.upper()}@{interval} (close: {update['close']})")
+                        logger.debug(f"Broadcasting KLINE -> {symbol.upper()}@{interval} (close: {update['close']})")
                         await self.broadcast(symbol, interval, update)
 
                     elif channel == "market:cmd_kline_sub":
@@ -239,7 +239,7 @@ class ConnectionManager:
                                 try:
                                     await ws.send(json.dumps(payload))
                                     self.subscribed_streams.add(stream_name)
-                                    print(f"[{tag}] ✅ Dynamic Subscribe: {stream_name}")
+                                    logger.info(f"[{tag}] Dynamic Subscribe: {stream_name}")
                                     logger.info(f"Dynamically subscribed to Binance WS: {stream_name}")
                                 except Exception as e:
                                     logger.error(f"Failed to dynamic subscribe to {stream_name}: {e}")
@@ -276,19 +276,19 @@ class ConnectionManager:
         tag = "SPOT" if is_spot else "FUTURES"
         while self.running:
             if not streams:
-                print(f"[{tag}] No streams to connect, sleeping...")
+                logger.warning(f"[{tag}] No streams to connect, sleeping...")
                 await asyncio.sleep(30)
                 continue
 
             stream_string = "/".join(streams)
             url = f"{base_url}/stream?streams={stream_string}"
-            print(f"[{tag}] Connecting to WS with {len(streams)} streams...")
-            print(f"[{tag}] URL: {url[:120]}...")
+            logger.info(f"[{tag}] Connecting to WS with {len(streams)} streams...")
+            logger.debug(f"[{tag}] URL: {url[:120]}...")
             logger.info(f"Connecting to {tag} WS ({len(streams)} streams)")
 
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=10) as ws:
-                    print(f"[{tag}] ✅ WebSocket connected!")
+                    logger.info(f"[{tag}] WebSocket connected!")
                     if is_spot:
                         self.binance_spot_ws = ws
                     else:
@@ -304,7 +304,7 @@ class ConnectionManager:
                             msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         except asyncio.TimeoutError:
                             logger.warning(f"[{tag}] No data received in 30s, reconnecting...")
-                            print(f"[{tag}] ⚠️  Zombie connection detected, reconnecting...")
+                            logger.warning(f"[{tag}] Zombie connection detected, reconnecting...")
                             break  # exits inner loop; outer loop reconnects
 
                         raw_data = json.loads(msg)
@@ -340,7 +340,7 @@ class ConnectionManager:
                                 await self.redis.publish("market:ticker", json.dumps(updates))
                                 if msg_count % 10 == 1:
                                     syms = list(updates.keys())[:5]
-                                    print(f"[{tag}] 📊 Ticker update #{msg_count}: {syms} ({len(updates)} symbols)")
+                                    logger.debug(f"[{tag}] Ticker update #{msg_count}: {syms} ({len(updates)} symbols)")
                             continue
 
                         # Handle kline streams
@@ -364,10 +364,10 @@ class ConnectionManager:
                                 "data": formatted_update,
                             }
                             await self.redis.publish("market:kline", json.dumps(payload))
-                            print(f"[{tag}] 🕯️  Kline Fetched -> {symbol.upper()}@{interval}: open={formatted_update['open']} close={formatted_update['close']} vol={formatted_update['volume']}")
+                            logger.debug(f"[{tag}] Kline -> {symbol.upper()}@{interval}: close={formatted_update['close']}")
 
             except Exception as e:
-                print(f"[{tag}] ❌ WS error: {e}")
+                logger.error(f"[{tag}] WS error: {e}")
                 logger.error(f"{tag} WS error: {e}")
                 await asyncio.sleep(5)
 
@@ -380,20 +380,20 @@ class ConnectionManager:
                 if futures and spot:
                     self._futures_only_syms = {m.lower() for m in futures}
                     self._spot_syms = {m.lower() for m in spot}
-                    print(f"[INIT] ✅ Loaded {len(self._spot_syms)} spot and {len(self._futures_only_syms)} futures symbols from Redis")
+                    logger.info(f"Loaded {len(self._spot_syms)} spot and {len(self._futures_only_syms)} futures symbols from Redis")
                     logger.info(f"Loaded {len(self._spot_syms)} spot and {len(self._futures_only_syms)} futures symbols from Redis")
                     return
                 else:
-                    print(f"[INIT] ⏳ Symbol lists empty, retrying ({attempt+1}/10)...")
+                    logger.info(f"Symbol lists empty, retrying ({attempt+1}/10)...")
             except Exception as e:
-                print(f"[INIT] ❌ Failed to load symbol lists: {e}")
+                logger.error(f"Failed to load symbol lists: {e}")
                 logger.error(f"Failed to load symbol lists from Redis: {e}")
             await asyncio.sleep(2)
 
         # Hardcoded fallback for known symbols
         self._futures_only_syms = {"xauusdt", "xagusdt"}
         self._spot_syms = {"btcusdt", "ethusdt", "solusdt"}
-        print(f"[INIT] ⚠️  Could not load symbol lists, using fallback")
+        logger.warning("Could not load symbol lists from Redis, using fallback")
 
     async def start_binance_stream(self):
         """
@@ -435,7 +435,7 @@ class ConnectionManager:
             futures_streams.append(seed)
             self.subscribed_streams.add(seed)
 
-        print(f"[INIT] Spot streams: {len(spot_streams)} | Futures streams: {len(futures_streams)}")
+        logger.info(f"Spot streams: {len(spot_streams)} | Futures streams: {len(futures_streams)}")
 
         # Launch independent tasks — one crash doesn't kill the other
         asyncio.create_task(self._run_stream_loop(spot_ws_base, spot_streams, is_spot=True))

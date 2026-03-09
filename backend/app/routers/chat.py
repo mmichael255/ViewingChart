@@ -1,7 +1,10 @@
-from fastapi import APIRouter, HTTPException
+import logging
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from app.services.llm_service import llm_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/chat",
@@ -21,4 +24,5 @@ async def chat_endpoint(request: ChatRequest):
         response = await llm_service.chat(request.message, request.chart_context)
         return {"response": response}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail="Chat service error")

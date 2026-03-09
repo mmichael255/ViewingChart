@@ -1,8 +1,11 @@
 from typing import List, Dict, Any
 import os
+import logging
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+logger = logging.getLogger(__name__)
 
 class LLMService:
     def __init__(self):
@@ -11,7 +14,7 @@ class LLMService:
             self.llm = ChatOpenAI(api_key=api_key, model="gpt-3.5-turbo")
         else:
             self.llm = None
-            print("OPENAI_API_KEY not found. Chat will run in mock mode.")
+            logger.warning("OPENAI_API_KEY not found. Chat will run in mock mode.")
 
     async def chat(self, message: str, chart_context: List[Dict[str, Any]] = None) -> str:
         if not self.llm:

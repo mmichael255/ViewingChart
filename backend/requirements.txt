@@ -15,3 +15,5 @@ pydantic-settings
 yfinance
 redis
 httpx
+tenacity
+slowapi
