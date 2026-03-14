@@ -38,7 +38,11 @@ class LLMService:
             HumanMessage(content=message),
         ]
 
-        response = await self.llm.ainvoke(messages)
-        return response.content
+        try:
+            response = await self.llm.ainvoke(messages)
+            return response.content
+        except Exception as e:
+            logger.error(f"LLM Error: {e}")
+            return f"I'm sorry, my AI connection is currently unavailable. Error: {e}"
 
 llm_service = LLMService()

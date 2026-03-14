@@ -95,7 +95,11 @@ async def websocket_tickers(websocket: WebSocket):
                 logger.warning("WS ticker: received non-JSON message")
             except Exception as e:
                 logger.error(f"WS ticker: error processing message: {e}")
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as e:
+        logger.warning(f"WS ticker disconnected gracefully: code={e.code}, reason={e.reason}")
+        manager.disconnect_tickers(websocket)
+    except Exception as e:
+        logger.error(f"WS ticker disconnected unexpectedly: {e}")
         manager.disconnect_tickers(websocket)
 
 
@@ -114,7 +118,11 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str, interval: str):
     try:
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as e:
+        logger.warning(f"WS kline {symbol}@{interval} disconnected gracefully: code={e.code}, reason={e.reason}")
+        manager.disconnect(websocket, symbol, interval)
+    except Exception as e:
+        logger.error(f"WS kline {symbol}@{interval} disconnected unexpectedly: {e}")
         manager.disconnect(websocket, symbol, interval)
 
 
@@ -134,9 +142,9 @@ async def get_klines(
     asset_type = validate_asset_type(asset_type)
 
     if asset_type == "stock" and not (symbol.startswith("XAU") or symbol.startswith("XAG")):
-        data = await stock_service.get_klines(symbol, interval=interval)
+        data = await stock_service.get_klines(symbol, interval=interval, limit=5000)
     else:
-        data = await binance_service.get_klines(symbol, interval=interval, limit=1000)
+        data = await binance_service.get_klines(symbol, interval=interval, limit=5000)
 
     if not data:
         raise HTTPException(status_code=404, detail="Data not found or error fetching data")

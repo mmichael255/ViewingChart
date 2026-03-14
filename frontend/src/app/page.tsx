@@ -12,6 +12,7 @@ import type { CandlestickData, Time } from 'lightweight-charts';
 import type { TickerData, WatchlistItem } from '@/types/market';
 import { WatchlistSidebar } from '@/components/WatchlistSidebar';
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
+import type { DrawingToolType } from '@/drawing';
 
 const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
@@ -36,6 +37,9 @@ export default function Home() {
   const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
   const [stockWatchlist, setStockWatchlist] = useState(STOCK_WATCHLIST);
   const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
+
+  // Drawing Tools State
+  const [activeTool, setActiveTool] = useState<DrawingToolType>('crosshair');
 
   // Indicators State
   const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([
@@ -63,7 +67,7 @@ export default function Home() {
 
   useEffect(() => {
     if (data && data.length > 0) {
-      document.title = `${symbol} - ${data[data.length - 1].close}`;
+      document.title = `${data[data.length - 1].close} - ${symbol}`;
     } else {
       document.title = 'ViewingChart';
     }
@@ -152,16 +156,19 @@ export default function Home() {
         <main className="flex-1 flex h-full overflow-hidden relative border border-gray-800 bg-[#1E222D]">
           {/* LEFT Drawing Toolbar */}
           <div className="w-10 flex flex-col items-center border-r border-gray-800 bg-[#1E222D] py-2 gap-2 z-30 shrink-0">
-            <ToolIcon icon="✜" tooltip="Crosshair" />
-            <ToolIcon icon="／" tooltip="Trend Line" />
-            <ToolIcon icon="⑃" tooltip="Pitchfork" />
-            <ToolIcon icon="🖌" tooltip="Brush" />
-            <ToolIcon icon="T" tooltip="Text" />
-            <ToolIcon icon="abcd" tooltip="Patterns" />
-            <ToolIcon icon="⬆⬇" tooltip="Prediction" />
-            <ToolIcon icon="📏" tooltip="Measure" />
+            <ToolIcon icon="✜" tooltip="Crosshair" isActive={activeTool === 'crosshair'} onClick={() => setActiveTool('crosshair')} />
+            <ToolIcon icon="／" tooltip="Trend Line" isActive={activeTool === 'trendline'} onClick={() => setActiveTool(activeTool === 'trendline' ? 'crosshair' : 'trendline')} />
+            <ToolIcon icon="—" tooltip="Horizontal Line" isActive={activeTool === 'horizontal_line'} onClick={() => setActiveTool(activeTool === 'horizontal_line' ? 'crosshair' : 'horizontal_line')} />
+            <ToolIcon icon="|" tooltip="Vertical Line" isActive={activeTool === 'vertical_line'} onClick={() => setActiveTool(activeTool === 'vertical_line' ? 'crosshair' : 'vertical_line')} />
+            <ToolIcon icon="↗" tooltip="Ray" isActive={activeTool === 'ray'} onClick={() => setActiveTool(activeTool === 'ray' ? 'crosshair' : 'ray')} />
+            <ToolIcon icon="⑃" tooltip="Parallel Channel" isActive={activeTool === 'parallel_channel'} onClick={() => setActiveTool(activeTool === 'parallel_channel' ? 'crosshair' : 'parallel_channel')} />
+            <ToolIcon icon="F" tooltip="Fib Retracement" isActive={activeTool === 'fib_retracement'} onClick={() => setActiveTool(activeTool === 'fib_retracement' ? 'crosshair' : 'fib_retracement')} />
+            <ToolIcon icon="⬜" tooltip="Rectangle" isActive={activeTool === 'rectangle'} onClick={() => setActiveTool(activeTool === 'rectangle' ? 'crosshair' : 'rectangle')} />
+            <ToolIcon icon="📏" tooltip="Measure" isActive={activeTool === 'measure'} onClick={() => setActiveTool(activeTool === 'measure' ? 'crosshair' : 'measure')} />
             <div className="flex-1" />
-            <ToolIcon icon="🗑" tooltip="Remove Objects" />
+            <ToolIcon icon="🗑" tooltip="Remove Selected" onClick={() => {
+              window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete' }));
+            }} />
           </div>
 
           {/* Center Chart Column */}
@@ -257,7 +264,7 @@ export default function Home() {
                 </div>
               )}
               <div className="flex-1 min-h-0 relative">
-                {data && <ChartComponent data={data as unknown as CandlestickData<Time>[]} symbol={symbol} indicators={activeIndicators} />}
+                {data && <ChartComponent data={data as unknown as CandlestickData<Time>[]} symbol={symbol} indicators={activeIndicators} activeTool={activeTool} />}
               </div>
 
               {/* ── Bottom Stack ── */}
@@ -324,8 +331,12 @@ export default function Home() {
   );
 }
 
-const ToolIcon = ({ icon, tooltip }: { icon: string, tooltip: string }) => (
-  <button title={tooltip} className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-[#2962FF] hover:bg-[#2962FF]/10 rounded transition-colors text-xs">
+const ToolIcon = ({ icon, tooltip, isActive, onClick }: { icon: string, tooltip: string, isActive?: boolean, onClick?: () => void }) => (
+  <button
+    title={tooltip}
+    onClick={onClick}
+    className={`w-7 h-7 flex items-center justify-center rounded transition-colors text-xs ${isActive ? 'text-[#2962FF] bg-[#2962FF]/10' : 'text-gray-400 hover:text-[#2962FF] hover:bg-[#2962FF]/10'}`}
+  >
     {icon}
   </button>
 );

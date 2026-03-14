@@ -25,38 +25,53 @@ export function WatchlistSidebar({
     const [tickers, setTickers] = useState<Record<string, any>>({});
     const wsRef = useRef<WebSocket | null>(null);
 
-    // Fix #5.3 — Only poll for STOCK symbols (no WS available for them).
-    // Crypto prices are handled entirely via WebSocket below.
     useEffect(() => {
-        if (stockWatchlist.length === 0) return;
-
         let timeoutId: number;
         let isActive = true;
 
-        const fetchStockTickers = async () => {
+        const fetchInitialTickers = async () => {
             try {
                 const stocks = stockWatchlist.map(i => i.sym).join(',');
-                const res = await fetch(`${API_URL}/market/tickers?stock_symbols=${stocks}`);
+                const cryptos = cryptoWatchlist.map(i => i.sym).join(',');
+                const res = await fetch(`${API_URL}/market/tickers?stock_symbols=${stocks}&crypto_symbols=${cryptos}`);
                 const newData = await res.json();
                 if (isActive) {
                     setTickers(prev => ({ ...prev, ...newData }));
                 }
             } catch (err) {
-                console.error("Failed to fetch stock tickers:", err);
-            } finally {
-                if (isActive) {
-                    timeoutId = window.setTimeout(fetchStockTickers, 10000);
+                console.error("Failed to fetch initial tickers:", err);
+            }
+
+            const pollStocks = async () => {
+                if (!isActive || stockWatchlist.length === 0) return;
+                try {
+                    const stocks = stockWatchlist.map(i => i.sym).join(',');
+                    const res = await fetch(`${API_URL}/market/tickers?stock_symbols=${stocks}`);
+                    const newData = await res.json();
+                    if (isActive) {
+                        setTickers(prev => ({ ...prev, ...newData }));
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch stock tickers:", err);
+                } finally {
+                    if (isActive) {
+                        timeoutId = window.setTimeout(pollStocks, 10000);
+                    }
                 }
+            };
+
+            if (isActive) {
+                timeoutId = window.setTimeout(pollStocks, 10000);
             }
         };
 
-        fetchStockTickers();
+        fetchInitialTickers();
 
         return () => {
             isActive = false;
             window.clearTimeout(timeoutId);
         };
-    }, [stockWatchlist]);
+    }, [stockWatchlist, cryptoWatchlist]);
 
     // WebSocket sync for cryptos — Fix #3.4: exponential backoff
     useEffect(() => {
@@ -67,11 +82,24 @@ export function WatchlistSidebar({
         const connectWS = () => {
             if (isUnmounted) return;
 
+            let pingTimeout: ReturnType<typeof setTimeout>;
+
+            const resetPingTimeout = () => {
+                clearTimeout(pingTimeout);
+                // Binance tickers broadcast every 1s-2s. If we don't hear anything for 15s, the connection is dead.
+                pingTimeout = setTimeout(() => {
+                    console.error("[Watchlist WS] Silent disconnect detected (no data for 15s). Forcing reconnect...");
+                    if (wsRef.current) wsRef.current.close();
+                }, 15000);
+            };
+
             const socket = new WebSocket(`${WS_URL}/market/ws/tickers`);
             wsRef.current = socket;
 
             socket.onopen = () => {
+                console.info(`[Watchlist WS] Connected successfully to ${WS_URL}/market/ws/tickers`);
                 reconnectAttempt = 0; // Reset backoff on success
+                resetPingTimeout(); // Start watchdog
                 socket.send(JSON.stringify({
                     action: 'subscribe',
                     symbols: cryptoWatchlist.map(i => i.sym)
@@ -79,23 +107,32 @@ export function WatchlistSidebar({
             };
 
             socket.onmessage = (event) => {
+                resetPingTimeout(); // Heartbeat received, reset watchdog
                 try {
                     const payload = JSON.parse(event.data);
                     if (payload && typeof payload === 'object') {
                         setTickers(prev => ({ ...prev, ...payload }));
                     }
                 } catch (e) {
-                    console.error("WS Ticker parsing error", e);
+                    console.error("[Watchlist WS] Ticker JSON parsing error", e, "Raw data:", event.data);
                 }
             };
 
-            socket.onclose = () => {
+            socket.onerror = (err) => {
+                console.error(`[Watchlist WS] Connection error:`, err);
+            };
+
+            socket.onclose = (event) => {
+                clearTimeout(pingTimeout); // Stop watchdog
+
                 if (!isUnmounted) {
                     // Fix #3.4 — Exponential backoff: 3s, 6s, 12s, ..., max 30s
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
                     reconnectAttempt++;
-                    console.log(`Watchlist WS closed. Reconnecting in ${delay / 1000}s...`);
+                    console.warn(`[Watchlist WS] Closed with code: ${event.code}, reason: ${event.reason}. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempt})`);
                     reconnectTimeout = setTimeout(connectWS, delay);
+                } else {
+                    console.info(`[Watchlist WS] Closed cleanly (component unmounted)`);
                 }
             };
         };
