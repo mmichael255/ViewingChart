@@ -149,7 +149,11 @@ class StockService:
             ticker = yf.Ticker(symbol)
             return ticker.history(period=period, interval=yf_interval)
 
-        df = await asyncio.to_thread(fetch_yf)
+        try:
+            df = await asyncio.to_thread(fetch_yf)
+        except Exception as e:
+            logger.error(f"Error fetching yfinance klines for {symbol}: {e}")
+            return []
 
         if df.empty:
             return []
@@ -258,9 +262,12 @@ class StockService:
         """
         # ── Check Redis cache first (Fix #2.2) ──
         cache_key = f"klines:stock:{symbol}:{interval}:{limit}"
-        cached = await self.redis_client.get(cache_key)
-        if cached:
-            return json.loads(cached)
+        try:
+            cached = await self.redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.debug(f"Redis get failed ({cache_key}): {e}")
 
         if self._is_alphavantage_symbol(symbol):
              data = await self._get_av_klines(symbol, interval, limit)
@@ -271,7 +278,10 @@ class StockService:
         if data:
             ttl_map = {"1m": 5, "3m": 10, "5m": 15, "15m": 30, "30m": 60, "1h": 60, "4h": 120}
             ttl = ttl_map.get(interval, 300)
-            await self.redis_client.setex(cache_key, ttl, json.dumps(data))
+            try:
+                await self.redis_client.setex(cache_key, ttl, json.dumps(data))
+            except Exception as e:
+                logger.debug(f"Redis setex failed ({cache_key}): {e}")
 
         return data
 
@@ -350,15 +360,21 @@ class StockService:
 
         async def fetch_and_cache(sym: str):
             # Check cache
-            cached = await self.redis_client.get(f'stock_quote:{sym}')
-            if cached:
-                results[sym] = json.loads(cached)
-                return
+            try:
+                cached = await self.redis_client.get(f'stock_quote:{sym}')
+                if cached:
+                    results[sym] = json.loads(cached)
+                    return
+            except Exception as e:
+                logger.debug(f"Redis get failed (stock_quote:{sym}): {e}")
 
             # Fetch fresh
             quote = await self.get_quote(sym)
             if quote:
-                await self.redis_client.setex(f'stock_quote:{sym}', self.cache_duration, json.dumps(quote))
+                try:
+                    await self.redis_client.setex(f'stock_quote:{sym}', self.cache_duration, json.dumps(quote))
+                except Exception as e:
+                    logger.debug(f"Redis setex failed (stock_quote:{sym}): {e}")
                 results[sym] = quote
 
         # Wait for all quote fetches to resolve via asyncio gather
@@ -376,9 +392,12 @@ class StockService:
 
         # Check Cache
         query_lower = query.lower()
-        cached = await self.redis_client.get(f'stock_search:{query_lower}')
-        if cached:
-            return json.loads(cached)
+        try:
+            cached = await self.redis_client.get(f'stock_search:{query_lower}')
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.debug(f"Redis get failed (stock_search:{query_lower}): {e}")
 
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -404,7 +423,10 @@ class StockService:
                 })
 
             # Update cache
-            await self.redis_client.setex(f'stock_search:{query_lower}', self.search_cache_duration, json.dumps(results))
+            try:
+                await self.redis_client.setex(f'stock_search:{query_lower}', self.search_cache_duration, json.dumps(results))
+            except Exception as e:
+                logger.debug(f"Redis setex failed (stock_search:{query_lower}): {e}")
 
         except Exception as e:
             logger.error(f"Error searching via Yahoo Finance: {e}")
@@ -412,9 +434,12 @@ class StockService:
         return results
 
     async def get_popular_stocks(self) -> List[Dict[str, str]]:
-        cached = await self.redis_client.get('stock_popular')
-        if cached:
-            return json.loads(cached)
+        try:
+            cached = await self.redis_client.get('stock_popular')
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.debug(f"Redis get failed (stock_popular): {e}")
 
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -460,7 +485,10 @@ class StockService:
                 { "symbol": "USDJPY=X", "name": "USD/JPY", "type": "CURRENCY", "source": "Alpha Vantage" }
             ])
 
-            await self.redis_client.setex('stock_popular', self.search_cache_duration, json.dumps(popular))
+            try:
+                await self.redis_client.setex('stock_popular', self.search_cache_duration, json.dumps(popular))
+            except Exception as e:
+                logger.debug(f"Redis setex failed (stock_popular): {e}")
             return popular
         except Exception as e:
             logger.error(f"Error fetching popular stocks: {e}")

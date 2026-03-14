@@ -57,6 +57,12 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
         const lastCandle = baseData[baseData.length - 1];
 
+        // Safeguard against corrupted data
+        if (!lastCandle || !update || typeof lastCandle.time === 'undefined') {
+            console.error('applyUpdate CRASH AVOIDED. baseData length:', baseData.length, 'lastCandle:', lastCandle, 'update:', update);
+            return currentData;
+        }
+
         if (lastCandle.time === update.time) {
             // Update existing candle in-place (shallow copy only the array, reuse all other objects)
             const newData = baseData.slice();
@@ -112,30 +118,50 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             // Don't reconnect if asset type changed away from crypto
             if (currentAssetType !== 'crypto') return;
 
+            let pingTimeout: ReturnType<typeof setTimeout>;
+
+            const resetPingTimeout = () => {
+                clearTimeout(pingTimeout);
+                // Binance klines broadcast every 1s-2s. If no data for 15s, connection is dead.
+                pingTimeout = setTimeout(() => {
+                    console.error(`[KLINE WS] Silent disconnect detected for ${currentSymbol}@${currentInterval} (no data for 15s). Forcing reconnect...`);
+                    if (wsRef.current) wsRef.current.close();
+                }, 15000);
+            };
+
             const ws = new WebSocket(`${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
             wsRef.current = ws;
 
             ws.onopen = () => {
-                console.log(`Connected to WS for ${currentSymbol}`);
+                console.info(`[KLINE WS] Connected successfully to ${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
                 reconnectAttempt = 0; // Reset backoff on successful connection
+                resetPingTimeout(); // Start watchdog
             };
 
             ws.onmessage = (event) => {
+                resetPingTimeout(); // Heartbeat received
                 // Fix #5.1 — Buffer update instead of immediate setState
-                pendingUpdateRef.current = JSON.parse(event.data);
+                try {
+                    pendingUpdateRef.current = JSON.parse(event.data);
+                } catch (e) {
+                    console.error(`[KLINE WS] JSON parsing error for ${currentSymbol}@${currentInterval}:`, e, "Raw data:", event.data);
+                }
             };
 
             ws.onerror = (err) => {
-                console.error(`WebSocket error for ${currentSymbol}:`, err);
+                console.error(`[KLINE WS] Connection error for ${currentSymbol}@${currentInterval}:`, err);
             };
 
-            ws.onclose = () => {
+            ws.onclose = (event) => {
+                clearTimeout(pingTimeout); // Stop watchdog
                 if (!cancelled) {
                     // Fix #3.4 — Exponential backoff: 3s, 6s, 12s, ..., max 30s
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
                     reconnectAttempt++;
-                    console.log(`WebSocket closed for ${currentSymbol}. Reconnecting in ${delay / 1000}s...`);
+                    console.warn(`[KLINE WS] Closed for ${currentSymbol}@${currentInterval} with code: ${event.code}, reason: ${event.reason}. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempt})`);
                     reconnectTimeout = setTimeout(connectWS, delay);
+                } else {
+                    console.info(`[KLINE WS] Closed cleanly for ${currentSymbol}@${currentInterval} (component unmounted/changed)`);
                 }
             };
         };

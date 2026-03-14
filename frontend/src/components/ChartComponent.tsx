@@ -2,17 +2,22 @@
 "use client";
 
 import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, HistogramData, Time, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
-import React, { useEffect, useRef, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { calculateSMA, calculateEMA, calculateBOLL, calculateSAR } from '../utils/indicators';
 import type { KlineData } from '@/types/market';
 import type { IndicatorConfig } from './IndicatorBar';
 import { OscillatorPane } from './OscillatorPane';
+import { DrawingManager } from '@/drawing';
+import type { DrawingToolType, DrawingPoint, DrawingObject } from '@/drawing';
+import { DrawingToolbar } from './DrawingToolbar';
 
 interface ChartComponentProps {
     data: CandlestickData<Time>[];
     volumeData?: HistogramData<Time>[];
     symbol?: string;
     indicators?: IndicatorConfig[];
+    activeTool?: DrawingToolType;
+    onDrawingSelectionChange?: (drawing: DrawingObject | null) => void;
     colors?: {
         backgroundColor?: string;
         lineColor?: string;
@@ -27,6 +32,8 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
     volumeData,
     symbol,
     indicators = [],
+    activeTool = 'crosshair',
+    onDrawingSelectionChange,
     colors = {
         backgroundColor: '#1E222D',
         lineColor: '#2962FF',
@@ -41,6 +48,9 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
     const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
     const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
     const indicatorSeriesRefs = useRef<{ [id: string]: ISeriesApi<"Line" | "Histogram">[] }>({});
+    const drawingManagerRef = useRef<DrawingManager>(new DrawingManager());
+
+    const [selectedDrawing, setSelectedDrawing] = useState<DrawingObject | null>(null);
 
     // Legend State
     const [hoverLegendData, setHoverLegendData] = useState<any>(null);
@@ -134,7 +144,18 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         });
         volumeSeriesRef.current = volumeSeries;
 
+        // Attach DrawingManager
+        drawingManagerRef.current.attach(chart, candlestickSeries);
+        drawingManagerRef.current.onSelectionChange = () => {
+            const drawing = drawingManagerRef.current.getSelectedDrawing();
+            setSelectedDrawing(drawing);
+            if (onDrawingSelectionChange) {
+                onDrawingSelectionChange(drawing);
+            }
+        };
+
         return () => {
+            drawingManagerRef.current.detach();
             observer.disconnect();
             chart.remove();
             chartRef.current = null;
@@ -151,8 +172,23 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                     const t = typeof d.time === 'string' && !isNaN(Number(d.time)) ? Number(d.time) : d.time;
                     return { ...d, time: t as Time };
                 });
+
             if (validData.length > 0) {
-                candlestickSeriesRef.current.setData(validData);
+                // Calculate average time difference to extrapolate into the future natively
+                let diff = 86400; // default to 1 day if not enough data
+                if (validData.length >= 2) {
+                    diff = Number(validData[validData.length - 1].time) - Number(validData[validData.length - 2].time);
+                }
+
+                // Add 150 whitespace candles (blank future space) native to lightweight-charts
+                const futurePadding = [];
+                const lastTime = Number(validData[validData.length - 1].time);
+                for (let i = 1; i <= 150; i++) {
+                    futurePadding.push({ time: (lastTime + diff * i) as Time });
+                }
+
+                const finalData = [...validData, ...futurePadding];
+                candlestickSeriesRef.current.setData(finalData);
             }
         }
     }, [data]);
@@ -297,13 +333,122 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
 
     }, [data, indicators, klineDataForMath]);
 
-    // 3. Reset Zoom on asset switch
+    // 3. Reset Zoom on asset switch + drawing persistence
     useEffect(() => {
         if (chartRef.current && symbol) {
             chartRef.current.timeScale().fitContent();
             chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+            drawingManagerRef.current.setSymbol(symbol);
         }
     }, [symbol]);
+
+    // 3.5 Sync active drawing tool
+    useEffect(() => {
+        drawingManagerRef.current.setTool(activeTool);
+    }, [activeTool]);
+
+    // 3.6 Chart click handler for drawing
+    const handleChartClick = useCallback((param: any) => {
+        if (!candlestickSeriesRef.current || !chartRef.current) return;
+        if (!param.time || !param.point) return;
+
+        // Convert pixel → chart coordinates
+        const price = candlestickSeriesRef.current.coordinateToPrice(param.point.y);
+        if (price === null) return;
+        const time = param.time as Time;
+
+        const drawingPoint: DrawingPoint = { time, price };
+        drawingManagerRef.current.handleClick(drawingPoint);
+    }, []);
+
+    useEffect(() => {
+        if (!chartRef.current) return;
+        chartRef.current.subscribeClick(handleChartClick);
+        return () => {
+            chartRef.current?.unsubscribeClick(handleChartClick);
+        };
+    }, [handleChartClick]);
+
+    // 3.7 Mouse move for drawing preview
+    useEffect(() => {
+        if (!chartRef.current) return;
+        const chart = chartRef.current;
+
+        const handleMove = (param: any) => {
+            if (!candlestickSeriesRef.current || !param.point || !param.time) return;
+            const price = candlestickSeriesRef.current.coordinateToPrice(param.point.y);
+            if (price === null) return;
+            const time = param.time as Time;
+            drawingManagerRef.current.handleMouseMove({ time, price });
+        };
+
+        chart.subscribeCrosshairMove(handleMove);
+        return () => {
+            chart.unsubscribeCrosshairMove(handleMove);
+        };
+    }, []);
+
+    // 3.8 Keyboard shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                drawingManagerRef.current.cancelDrawing();
+            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                drawingManagerRef.current.removeSelected();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
+    // 3.9 Native drag handlers for drawings
+    useEffect(() => {
+        const container = chartContainerRef.current;
+        if (!container) return;
+
+        const handleMouseDown = (e: MouseEvent) => {
+            if (e.button !== 0 || !chartRef.current) return;
+            const rect = container.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const py = e.clientY - rect.top;
+
+            const handled = drawingManagerRef.current.handleMouseDown(px, py);
+            if (handled) {
+                e.stopPropagation();
+            }
+        };
+
+        const handleMouseMove = (e: MouseEvent) => {
+            if (!chartRef.current) return;
+            const rect = container.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const py = e.clientY - rect.top;
+
+            const handled = drawingManagerRef.current.handleDrag(px, py);
+            if (handled) {
+                e.stopPropagation();
+            }
+        };
+
+        const handleMouseUp = (e: MouseEvent) => {
+            if (!chartRef.current) return;
+            const handled = drawingManagerRef.current.endDrag();
+            if (handled) {
+                e.stopPropagation();
+            }
+        };
+
+        // Use capture phase to intercept before lightweight-charts panning
+        container.addEventListener('mousedown', handleMouseDown, { capture: true });
+        window.addEventListener('mousemove', handleMouseMove, { capture: true });
+        window.addEventListener('mouseup', handleMouseUp, { capture: true });
+
+        return () => {
+            container.removeEventListener('mousedown', handleMouseDown, { capture: true });
+            window.removeEventListener('mousemove', handleMouseMove, { capture: true });
+            window.removeEventListener('mouseup', handleMouseUp, { capture: true });
+        };
+    }, []);
 
     // 4. Setup crosshair subscription
     useEffect(() => {
@@ -399,6 +544,21 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                         );
                     })}
                 </div>
+
+                {/* ── DRAWING TOOLBAR OVERLAY ── */}
+                {selectedDrawing && (
+                    <DrawingToolbar
+                        drawing={selectedDrawing}
+                        onUpdateStyle={(style) => {
+                            drawingManagerRef.current.updateSelectedStyle(style);
+                            setSelectedDrawing(drawingManagerRef.current.getSelectedDrawing());
+                        }}
+                        onDelete={() => {
+                            drawingManagerRef.current.removeSelected();
+                            setSelectedDrawing(null);
+                        }}
+                    />
+                )}
 
                 <div
                     ref={chartContainerRef}

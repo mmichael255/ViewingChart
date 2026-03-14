@@ -50,7 +50,10 @@ class ConnectionManager:
         self._stream_refcount[stream_name] = self._stream_refcount.get(stream_name, 0) + 1
 
         if stream_name not in self.subscribed_streams:
-            await self.redis.publish("market:cmd_kline_sub", json.dumps({"stream": stream_name}))
+            try:
+                await self.redis.publish("market:cmd_kline_sub", json.dumps({"stream": stream_name}))
+            except Exception as e:
+                logger.debug(f"Redis publish failed (kline_sub): {e}")
 
     def disconnect(self, websocket: WebSocket, symbol: str, interval: str):
         key = f"{symbol.lower()}_{interval}"
@@ -203,68 +206,70 @@ class ConnectionManager:
         Background task to consume from Redis Pub/Sub and broadcast locally.
         Allows multiple server instances to share data from one Binance streamer.
         """
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe("market:ticker", "market:kline", "market:cmd_kline_sub", "market:cmd_ticker_sub")
-        logger.info("Subscribed to Redis Pub/Sub channels")
+        while self.running:
+            try:
+                pubsub = self.redis.pubsub()
+                await pubsub.subscribe("market:ticker", "market:kline", "market:cmd_kline_sub", "market:cmd_ticker_sub")
+                logger.info("Subscribed to Redis Pub/Sub channels")
 
-        try:
-            async for message in pubsub.listen():
-                if message["type"] == "message":
-                    channel = message["channel"]
-                    data = json.loads(message["data"])
+                async for message in pubsub.listen():
+                    if message["type"] == "message":
+                        channel = message["channel"]
+                        data = json.loads(message["data"])
 
-                    if channel == "market:ticker":
-                        await self.broadcast_ticker(data)
+                        if channel == "market:ticker":
+                            await self.broadcast_ticker(data)
 
-                    elif channel == "market:kline":
-                        symbol = data["symbol"]
-                        interval = data["interval"]
-                        update = data["data"]
-                        logger.debug(f"Broadcasting KLINE -> {symbol.upper()}@{interval} (close: {update['close']})")
-                        await self.broadcast(symbol, interval, update)
+                        elif channel == "market:kline":
+                            symbol = data["symbol"]
+                            interval = data["interval"]
+                            update = data["data"]
+                            logger.debug(f"Broadcasting KLINE -> {symbol.upper()}@{interval} (close: {update['close']})")
+                            await self.broadcast(symbol, interval, update)
 
-                    elif channel == "market:cmd_kline_sub":
-                        stream_name = data.get("stream")
-                        if stream_name and stream_name not in self.subscribed_streams:
-                            base_sym = stream_name.split("@")[0].lower()
-                            is_spot = base_sym in self._spot_syms
-                            ws = self.binance_spot_ws if is_spot else self.binance_futures_ws
-                            tag = "SPOT" if is_spot else "FUTURES"
-                            if ws:
-                                payload = {
-                                    "method": "SUBSCRIBE",
-                                    "params": [stream_name],
-                                    "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
-                                }
-                                try:
-                                    await ws.send(json.dumps(payload))
-                                    self.subscribed_streams.add(stream_name)
-                                    logger.info(f"[{tag}] Dynamic Subscribe: {stream_name}")
-                                    logger.info(f"Dynamically subscribed to Binance WS: {stream_name}")
-                                except Exception as e:
-                                    logger.error(f"Failed to dynamic subscribe to {stream_name}: {e}")
+                        elif channel == "market:cmd_kline_sub":
+                            stream_name = data.get("stream")
+                            if stream_name and stream_name not in self.subscribed_streams:
+                                base_sym = stream_name.split("@")[0].lower()
+                                is_spot = base_sym in self._spot_syms
+                                ws = self.binance_spot_ws if is_spot else self.binance_futures_ws
+                                tag = "SPOT" if is_spot else "FUTURES"
+                                if ws:
+                                    payload = {
+                                        "method": "SUBSCRIBE",
+                                        "params": [stream_name],
+                                        "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
+                                    }
+                                    try:
+                                        await ws.send(json.dumps(payload))
+                                        self.subscribed_streams.add(stream_name)
+                                        logger.info(f"[{tag}] Dynamic Subscribe: {stream_name}")
+                                        logger.info(f"Dynamically subscribed to Binance WS: {stream_name}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to dynamic subscribe to {stream_name}: {e}")
 
-                    elif channel == "market:cmd_ticker_sub":
-                        tickers = data.get("symbols", [])
-                        # Rebuild watchlist from all active subscriptions + new ones
-                        new_syms = set(self._default_watchlist_syms)
-                        new_syms.update(t.upper() for t in tickers)
-                        for sub_set in self.ticker_subscriptions.values():
-                            new_syms.update(sub_set)
+                        elif channel == "market:cmd_ticker_sub":
+                            tickers = data.get("symbols", [])
+                            # Rebuild watchlist from all active subscriptions + new ones
+                            new_syms = set(self._default_watchlist_syms)
+                            new_syms.update(t.upper() for t in tickers)
+                            for sub_set in self.ticker_subscriptions.values():
+                                new_syms.update(sub_set)
 
-                        added = new_syms - self.global_watchlist_syms
-                        removed = self.global_watchlist_syms - new_syms
-                        self.global_watchlist_syms = new_syms
+                            added = new_syms - self.global_watchlist_syms
+                            removed = self.global_watchlist_syms - new_syms
+                            self.global_watchlist_syms = new_syms
 
-                        if added or removed:
-                            await self._update_ticker_streams(added, removed)
+                            if added or removed:
+                                await self._update_ticker_streams(added, removed)
 
-                        logger.info(f"Global watchlist updated: {len(self.global_watchlist_syms)} symbols tracked.")
+                            logger.info(f"Global watchlist updated: {len(self.global_watchlist_syms)} symbols tracked.")
 
-        except asyncio.CancelledError:
-            await pubsub.unsubscribe()
-        except Exception as e:
-            logger.error(f"Redis Pub/Sub Error: {e}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Redis Pub/Sub Error: {e}")
+                await asyncio.sleep(5)
 
     # ── Binance Stream Runners ────────────────────────────────────────
 
@@ -303,9 +308,11 @@ class ConnectionManager:
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         except asyncio.TimeoutError:
-                            logger.warning(f"[{tag}] No data received in 30s, reconnecting...")
-                            logger.warning(f"[{tag}] Zombie connection detected, reconnecting...")
+                            logger.error(f"[{tag}] CRITICAL: No data received from Binance in 30s. Connection dead. Forcing reconnect...")
                             break  # exits inner loop; outer loop reconnects
+                        except websockets.exceptions.ConnectionClosed as e:
+                            logger.error(f"[{tag}] CRITICAL: Binance closed connection unexpectedly: code={e.code}, reason={e.reason}")
+                            break
 
                         raw_data = json.loads(msg)
                         data = raw_data.get("data", raw_data)
@@ -322,7 +329,11 @@ class ConnectionManager:
                                         "priceChangePercent": float(data["P"]),
                                     }
                                 }
-                                await self.redis.publish("market:ticker", json.dumps(update))
+                                try:
+                                    await self.redis.publish("market:ticker", json.dumps(update))
+                                    await self.redis.hset("binance:tickers", s, json.dumps(update[s]))
+                                except Exception as e:
+                                    logger.debug(f"Redis publish/hset failed (ticker): {e}")
                             continue
 
                         # Handle ticker array (!ticker@arr) — kept as fallback
@@ -337,7 +348,10 @@ class ConnectionManager:
                                         "priceChangePercent": float(item["P"]),
                                     }
                             if updates:
-                                await self.redis.publish("market:ticker", json.dumps(updates))
+                                try:
+                                    await self.redis.publish("market:ticker", json.dumps(updates))
+                                except Exception as e:
+                                    logger.debug(f"Redis publish failed (ticker array): {e}")
                                 if msg_count % 10 == 1:
                                     syms = list(updates.keys())[:5]
                                     logger.debug(f"[{tag}] Ticker update #{msg_count}: {syms} ({len(updates)} symbols)")
@@ -363,12 +377,23 @@ class ConnectionManager:
                                 "interval": interval,
                                 "data": formatted_update,
                             }
-                            await self.redis.publish("market:kline", json.dumps(payload))
+                            try:
+                                await self.redis.publish("market:kline", json.dumps(payload))
+                            except Exception as e:
+                                logger.debug(f"Redis publish failed (kline): {e}")
                             logger.debug(f"[{tag}] Kline -> {symbol.upper()}@{interval}: close={formatted_update['close']}")
 
+            except websockets.exceptions.InvalidURI as e:
+                logger.error(f"[{tag}] Invalid WS URI: {url} - Error: {e}")
+                await asyncio.sleep(5)
+            except websockets.exceptions.InvalidHandshake as e:
+                logger.error(f"[{tag}] WS Handshake Failed (Check IP Bans!): {e}")
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                logger.warning(f"[{tag}] Stream loop cancelled cleanly.")
+                break
             except Exception as e:
-                logger.error(f"[{tag}] WS error: {e}")
-                logger.error(f"{tag} WS error: {e}")
+                logger.error(f"[{tag}] Unhandled WS connection error: type={type(e).__name__}, err={e}")
                 await asyncio.sleep(5)
 
     async def _load_symbols(self):
