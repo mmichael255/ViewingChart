@@ -306,9 +306,10 @@ class ConnectionManager:
                     while self.running:
                         # Fix #3.1 — timeout on recv to detect zombie connections
                         try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                            # Tickers are frequent; klines alone can be sparse on higher TFs — avoid false reconnects
+                            msg = await asyncio.wait_for(ws.recv(), timeout=90)
                         except asyncio.TimeoutError:
-                            logger.error(f"[{tag}] CRITICAL: No data received from Binance in 30s. Connection dead. Forcing reconnect...")
+                            logger.error(f"[{tag}] CRITICAL: No data received from Binance in 90s. Connection dead. Forcing reconnect...")
                             break  # exits inner loop; outer loop reconnects
                         except websockets.exceptions.ConnectionClosed as e:
                             logger.error(f"[{tag}] CRITICAL: Binance closed connection unexpectedly: code={e.code}, reason={e.reason}")

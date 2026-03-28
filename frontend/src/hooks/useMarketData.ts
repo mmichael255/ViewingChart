@@ -1,5 +1,4 @@
 import useSWR from 'swr';
-import { Time } from 'lightweight-charts';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { API_URL, WS_URL } from '@/config';
 import type { KlineData } from '@/types/market';
@@ -63,12 +62,14 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             return currentData;
         }
 
-        if (lastCandle.time === update.time) {
+        const tLast = Number(lastCandle.time);
+        const tUp = Number(update.time);
+        if (tLast === tUp) {
             // Update existing candle in-place (shallow copy only the array, reuse all other objects)
             const newData = baseData.slice();
             newData[newData.length - 1] = update;
             return newData;
-        } else if (update.time > lastCandle.time) {
+        } else if (tUp > tLast) {
             return [...baseData, update];
         }
 
@@ -76,19 +77,19 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
     }, []);
 
     useEffect(() => {
-        // Animation frame loop: flush pending WS updates at screen refresh rate
+        // Use setInterval instead of requestAnimationFrame so updates flush even when tab is backgrounded
+        let intervalId: ReturnType<typeof setInterval>;
         const tick = () => {
             const update = pendingUpdateRef.current;
             if (update) {
                 pendingUpdateRef.current = null;
                 setRealtimeData(prev => applyUpdate(prev, update));
             }
-            rafIdRef.current = requestAnimationFrame(tick);
         };
-        rafIdRef.current = requestAnimationFrame(tick);
+        intervalId = setInterval(tick, 100); // Flush max 10 times per second
 
         return () => {
-            cancelAnimationFrame(rafIdRef.current);
+            clearInterval(intervalId);
         };
     }, [applyUpdate]);
 
@@ -122,11 +123,12 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
             const resetPingTimeout = () => {
                 clearTimeout(pingTimeout);
-                // Binance klines broadcast every 1s-2s. If no data for 15s, connection is dead.
+                // Backend sends JSON heartbeats every 25s; Binance klines can be quiet on 1d/1w.
+                // 75s avoids false reconnects while still detecting dead sockets.
                 pingTimeout = setTimeout(() => {
-                    console.error(`[KLINE WS] Silent disconnect detected for ${currentSymbol}@${currentInterval} (no data for 15s). Forcing reconnect...`);
+                    console.error(`[KLINE WS] Silent disconnect detected for ${currentSymbol}@${currentInterval} (no message for 75s). Forcing reconnect...`);
                     if (wsRef.current) wsRef.current.close();
-                }, 15000);
+                }, 75000);
             };
 
             const ws = new WebSocket(`${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
@@ -139,10 +141,13 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             };
 
             ws.onmessage = (event) => {
-                resetPingTimeout(); // Heartbeat received
-                // Fix #5.1 — Buffer update instead of immediate setState
+                resetPingTimeout();
                 try {
-                    pendingUpdateRef.current = JSON.parse(event.data);
+                    const msg = JSON.parse(event.data) as Record<string, unknown>;
+                    if (msg && msg.type === 'heartbeat') {
+                        return;
+                    }
+                    pendingUpdateRef.current = msg as unknown as KlineData;
                 } catch (e) {
                     console.error(`[KLINE WS] JSON parsing error for ${currentSymbol}@${currentInterval}:`, e, "Raw data:", event.data);
                 }

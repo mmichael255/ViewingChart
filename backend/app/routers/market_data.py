@@ -1,11 +1,14 @@
+import asyncio
 import json
 import logging
+import time
 from typing import Literal
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from app.services.binance_service import binance_service
 from app.services.stock_service import stock_service
+from app.services.klines_db_service import get_klines_db_first
 from app.services.websocket_manager import manager
 from app.config import VALID_INTERVALS, VALID_ASSET_TYPES, SYMBOL_PATTERN, MAX_SYMBOLS_PER_REQUEST, MAX_SEARCH_QUERY_LENGTH
 
@@ -103,6 +106,16 @@ async def websocket_tickers(websocket: WebSocket):
         manager.disconnect_tickers(websocket)
 
 
+async def _kline_ws_heartbeat(websocket: WebSocket) -> None:
+    """Keep client connections alive when Binance kline updates are sparse (e.g. 1d)."""
+    while True:
+        await asyncio.sleep(25)
+        try:
+            await websocket.send_json({"type": "heartbeat", "ts": int(time.time())})
+        except Exception:
+            return
+
+
 @router.websocket("/ws/{symbol}/{interval}")
 async def websocket_endpoint(websocket: WebSocket, symbol: str, interval: str):
     # Validate params before accepting the connection
@@ -115,14 +128,20 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str, interval: str):
         return
 
     await manager.connect(websocket, symbol, interval)
+    hb_task = asyncio.create_task(_kline_ws_heartbeat(websocket))
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect as e:
         logger.warning(f"WS kline {symbol}@{interval} disconnected gracefully: code={e.code}, reason={e.reason}")
-        manager.disconnect(websocket, symbol, interval)
     except Exception as e:
         logger.error(f"WS kline {symbol}@{interval} disconnected unexpectedly: {e}")
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
         manager.disconnect(websocket, symbol, interval)
 
 
@@ -141,10 +160,9 @@ async def get_klines(
     interval = validate_interval(interval)
     asset_type = validate_asset_type(asset_type)
 
-    if asset_type == "stock" and not (symbol.startswith("XAU") or symbol.startswith("XAG")):
-        data = await stock_service.get_klines(symbol, interval=interval, limit=5000)
-    else:
-        data = await binance_service.get_klines(symbol, interval=interval, limit=5000)
+    data = await get_klines_db_first(
+        symbol, bar_interval=interval, asset_type=asset_type, limit=5000
+    )
 
     if not data:
         raise HTTPException(status_code=404, detail="Data not found or error fetching data")
