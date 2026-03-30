@@ -6,7 +6,7 @@ import { PriceHighlight } from '@/components/Highlighting';
 import { IndicatorBar, IndicatorConfig, availableIndicators } from '@/components/IndicatorBar';
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { API_URL, WS_URL } from '@/config';
 import type { CandlestickData, Time } from 'lightweight-charts';
 import type { TickerData, WatchlistItem } from '@/types/market';
@@ -65,13 +65,21 @@ export default function Home() {
 
   const { data, isLoading, isError } = useMarketData(symbol, chartInterval, assetType);
 
+  /** Same last bar as the chart / kline stream (REST + WS merged in useMarketData). */
+  const lastClose = useMemo(() => {
+    if (!data?.length) return null;
+    const c = data[data.length - 1].close;
+    const n = typeof c === 'number' ? c : Number(c);
+    return Number.isFinite(n) ? n : null;
+  }, [data]);
+
   useEffect(() => {
-    if (data && data.length > 0) {
-      document.title = `${data[data.length - 1].close} - ${symbol}`;
+    if (lastClose != null) {
+      document.title = `${lastClose.toFixed(2)} · ${symbol} · ViewingChart`;
     } else {
       document.title = 'ViewingChart';
     }
-  }, [data, symbol]);
+  }, [lastClose, symbol]);
 
   const handleSymbolChange = (newSymbol: string, type: string) => {
     setSymbol(newSymbol);
@@ -175,8 +183,11 @@ export default function Home() {
           <div className="flex-1 flex flex-col h-full min-w-0">
             {/* Chart Toolbar */}
             <div className="flex items-center gap-3 px-4 h-11 border-b border-gray-800 bg-[#1E222D] shrink-0 z-30">
-              <div className="flex items-center gap-3 mr-4 shrink-0">
+              <div className="flex items-center gap-2 mr-4 shrink-0 min-w-0">
                 <span className="text-sm font-bold text-white tracking-tight">{symbol}</span>
+                {lastClose != null && (
+                  <PriceHighlight price={lastClose} className="text-sm font-bold tabular-nums" />
+                )}
               </div>
               <div className="w-px h-5 bg-gray-700 mx-1" />
 

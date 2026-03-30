@@ -78,6 +78,7 @@ def parse_symbol_list(raw: str) -> list[str]:
 @router.websocket("/ws/tickers")
 async def websocket_tickers(websocket: WebSocket):
     await manager.connect_tickers(websocket)
+    hb_task = asyncio.create_task(_ticker_ws_heartbeat(websocket))
     try:
         while True:
             data = await websocket.receive_text()
@@ -100,10 +101,25 @@ async def websocket_tickers(websocket: WebSocket):
                 logger.error(f"WS ticker: error processing message: {e}")
     except WebSocketDisconnect as e:
         logger.warning(f"WS ticker disconnected gracefully: code={e.code}, reason={e.reason}")
-        manager.disconnect_tickers(websocket)
     except Exception as e:
         logger.error(f"WS ticker disconnected unexpectedly: {e}")
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
         manager.disconnect_tickers(websocket)
+
+
+async def _ticker_ws_heartbeat(websocket: WebSocket) -> None:
+    """Ping clients on an interval so foreground watchdogs reset without ticker traffic."""
+    while True:
+        await asyncio.sleep(25)
+        try:
+            await websocket.send_json({"type": "heartbeat", "ts": int(time.time())})
+        except Exception:
+            return
 
 
 async def _kline_ws_heartbeat(websocket: WebSocket) -> None:

@@ -24,6 +24,12 @@ export function WatchlistSidebar({
 }: WatchlistSidebarProps) {
     const [tickers, setTickers] = useState<Record<string, any>>({});
     const wsRef = useRef<WebSocket | null>(null);
+    const cryptoWatchlistRef = useRef(cryptoWatchlist);
+    const stockWatchlistRef = useRef(stockWatchlist);
+    useEffect(() => {
+        cryptoWatchlistRef.current = cryptoWatchlist;
+        stockWatchlistRef.current = stockWatchlist;
+    });
 
     useEffect(() => {
         let timeoutId: number;
@@ -78,28 +84,92 @@ export function WatchlistSidebar({
         let reconnectTimeout: ReturnType<typeof setTimeout>;
         let isUnmounted = false;
         let reconnectAttempt = 0;
+        let pingTimeout: ReturnType<typeof setTimeout>;
+        let tabHidden =
+            typeof document !== 'undefined' && document.visibilityState === 'hidden';
+        let lastHiddenAt = 0;
 
-        const connectWS = () => {
+        function clearPingWatchdog() {
+            clearTimeout(pingTimeout);
+        }
+
+        function armPingWatchdog() {
+            clearPingWatchdog();
+            if (tabHidden || isUnmounted) return;
+            // Only enforced while tab is visible — background tabs throttle JS and WS delivery.
+            pingTimeout = setTimeout(() => {
+                if (tabHidden || isUnmounted) return;
+                console.error(
+                    '[Watchlist WS] Silent disconnect detected (no data for 60s while tab visible). Forcing reconnect...'
+                );
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.close();
+                }
+            }, 60000);
+        }
+
+        async function refreshPricesFromRest() {
             if (isUnmounted) return;
+            const stocks = stockWatchlistRef.current.map(i => i.sym).join(',');
+            const cryptos = cryptoWatchlistRef.current.map(i => i.sym).join(',');
+            if (!stocks && !cryptos) return;
+            try {
+                const res = await fetch(
+                    `${API_URL}/market/tickers?stock_symbols=${stocks}&crypto_symbols=${cryptos}`
+                );
+                const newData = await res.json();
+                if (!isUnmounted && newData && typeof newData === 'object') {
+                    setTickers(prev => ({ ...prev, ...newData }));
+                }
+            } catch (err) {
+                console.error('[Watchlist] REST refresh after idle failed:', err);
+            }
+        }
 
-            let pingTimeout: ReturnType<typeof setTimeout>;
+        function reconnectTickerWsSafely() {
+            if (isUnmounted) return;
+            const w = wsRef.current;
+            if (w) {
+                w.onclose = null;
+                clearTimeout(reconnectTimeout);
+                try {
+                    w.close();
+                } catch {
+                    /* ignore */
+                }
+            }
+            connectWS();
+        }
 
-            const resetPingTimeout = () => {
-                clearTimeout(pingTimeout);
-                // Binance tickers broadcast every 1s-2s. If we don't hear anything for 15s, the connection is dead.
-                pingTimeout = setTimeout(() => {
-                    console.error("[Watchlist WS] Silent disconnect detected (no data for 15s). Forcing reconnect...");
-                    if (wsRef.current) wsRef.current.close();
-                }, 15000);
-            };
+        function onVisibilityChange() {
+            if (document.visibilityState === 'hidden') {
+                lastHiddenAt = Date.now();
+                tabHidden = true;
+                clearPingWatchdog();
+                return;
+            }
+            tabHidden = false;
+            armPingWatchdog();
+            void refreshPricesFromRest();
+            const awayMs = lastHiddenAt ? Date.now() - lastHiddenAt : 0;
+            // Ticker WS can stay OPEN but stop receiving (proxy / server); kline WS still works.
+            if (lastHiddenAt && awayMs >= 30_000) {
+                reconnectTickerWsSafely();
+            } else if (wsRef.current?.readyState === WebSocket.CLOSED && !isUnmounted) {
+                connectWS();
+            }
+        }
+
+        function connectWS() {
+            if (isUnmounted) return;
 
             const socket = new WebSocket(`${WS_URL}/market/ws/tickers`);
             wsRef.current = socket;
 
             socket.onopen = () => {
                 console.info(`[Watchlist WS] Connected successfully to ${WS_URL}/market/ws/tickers`);
-                reconnectAttempt = 0; // Reset backoff on success
-                resetPingTimeout(); // Start watchdog
+                reconnectAttempt = 0;
+                armPingWatchdog();
                 socket.send(JSON.stringify({
                     action: 'subscribe',
                     symbols: cryptoWatchlist.map(i => i.sym)
@@ -107,14 +177,17 @@ export function WatchlistSidebar({
             };
 
             socket.onmessage = (event) => {
-                resetPingTimeout(); // Heartbeat received, reset watchdog
+                armPingWatchdog();
                 try {
                     const payload = JSON.parse(event.data);
+                    if (payload && typeof payload === 'object' && payload.type === 'heartbeat') {
+                        return;
+                    }
                     if (payload && typeof payload === 'object') {
                         setTickers(prev => ({ ...prev, ...payload }));
                     }
                 } catch (e) {
-                    console.error("[Watchlist WS] Ticker JSON parsing error", e, "Raw data:", event.data);
+                    console.error('[Watchlist WS] Ticker JSON parsing error', e, 'Raw data:', event.data);
                 }
             };
 
@@ -123,25 +196,33 @@ export function WatchlistSidebar({
             };
 
             socket.onclose = (event) => {
-                clearTimeout(pingTimeout); // Stop watchdog
+                clearPingWatchdog();
 
                 if (!isUnmounted) {
-                    // Fix #3.4 — Exponential backoff: 3s, 6s, 12s, ..., max 30s
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
                     reconnectAttempt++;
-                    console.warn(`[Watchlist WS] Closed with code: ${event.code}, reason: ${event.reason}. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempt})`);
+                    console.warn(
+                        `[Watchlist WS] Closed with code: ${event.code}, reason: ${event.reason}. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempt})`
+                    );
                     reconnectTimeout = setTimeout(connectWS, delay);
                 } else {
                     console.info(`[Watchlist WS] Closed cleanly (component unmounted)`);
                 }
             };
-        };
+        }
 
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', onVisibilityChange);
+        }
         connectWS();
 
         return () => {
             isUnmounted = true;
             clearTimeout(reconnectTimeout);
+            clearPingWatchdog();
+            if (typeof document !== 'undefined') {
+                document.removeEventListener('visibilitychange', onVisibilityChange);
+            }
             if (wsRef.current) {
                 wsRef.current.onclose = null;
                 wsRef.current.close();

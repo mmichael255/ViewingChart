@@ -30,6 +30,9 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
     useEffect(() => { assetTypeRef.current = assetType; }, [assetType]);
 
     const initialDataRef = useRef<KlineData[]>([]);
+    /** Avoid wiping on first mount — that runs after the initialData effect and empties the ref, so WS updates never apply */
+    const prevChartKeyRef = useRef<string | null>(null);
+
     useEffect(() => {
         if (initialData) {
             initialDataRef.current = initialData;
@@ -37,11 +40,20 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         }
     }, [initialData]);
 
-    // Track when initial data changes to optionally reset realtime data if symbol changes
+    // Reset realtime slice only when symbol / interval / asset actually change, not on initial mount
     useEffect(() => {
-        // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+        const key = `${symbol}|${interval}|${assetType}`;
+        const prev = prevChartKeyRef.current;
+        if (prev === key) {
+            return;
+        }
+        prevChartKeyRef.current = key;
+        if (prev === null) {
+            return;
+        }
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setRealtimeData(undefined);
-        initialDataRef.current = []; // CRITICAL FIX: explicit wipe of stale history on symbol change
+        initialDataRef.current = [];
     }, [symbol, interval, assetType]);
 
     // ── Fix #5.1 — Batch WS updates via requestAnimationFrame ──
@@ -103,45 +115,64 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         }
 
         let reconnectTimeout: ReturnType<typeof setTimeout>;
-        // Guard: if the effect has been cleaned up, don't reconnect
         let cancelled = false;
-        // Fix #3.4 — Exponential backoff for WS reconnect
         let reconnectAttempt = 0;
+        let pingTimeout: ReturnType<typeof setTimeout>;
+        // Background tabs throttle timers and delay onmessage; silence watchdog would false-positive.
+        let tabHidden =
+            typeof document !== 'undefined' && document.visibilityState === 'hidden';
 
-        const connectWS = () => {
+        function clearPingWatchdog() {
+            clearTimeout(pingTimeout);
+        }
+
+        function armPingWatchdog(currentSymbol: string, currentInterval: string) {
+            clearPingWatchdog();
+            if (tabHidden || cancelled) return;
+            pingTimeout = setTimeout(() => {
+                if (tabHidden || cancelled) return;
+                console.error(
+                    `[KLINE WS] Silent disconnect detected for ${currentSymbol}@${currentInterval} (no message for 75s while tab visible). Forcing reconnect...`
+                );
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.close();
+                }
+            }, 75000);
+        }
+
+        function onVisibilityChange() {
+            tabHidden = document.visibilityState === 'hidden';
+            if (tabHidden) {
+                clearPingWatchdog();
+            } else {
+                armPingWatchdog(symbolRef.current, intervalRef.current);
+                const w = wsRef.current;
+                if (w?.readyState === WebSocket.CLOSED && !cancelled) {
+                    connectWS();
+                }
+            }
+        }
+
+        function connectWS() {
             if (cancelled) return;
 
-            // Always read the latest symbol/interval from refs
             const currentSymbol = symbolRef.current;
             const currentInterval = intervalRef.current;
             const currentAssetType = assetTypeRef.current;
 
-            // Don't reconnect if asset type changed away from crypto
             if (currentAssetType !== 'crypto') return;
-
-            let pingTimeout: ReturnType<typeof setTimeout>;
-
-            const resetPingTimeout = () => {
-                clearTimeout(pingTimeout);
-                // Backend sends JSON heartbeats every 25s; Binance klines can be quiet on 1d/1w.
-                // 75s avoids false reconnects while still detecting dead sockets.
-                pingTimeout = setTimeout(() => {
-                    console.error(`[KLINE WS] Silent disconnect detected for ${currentSymbol}@${currentInterval} (no message for 75s). Forcing reconnect...`);
-                    if (wsRef.current) wsRef.current.close();
-                }, 75000);
-            };
 
             const ws = new WebSocket(`${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
             wsRef.current = ws;
 
             ws.onopen = () => {
                 console.info(`[KLINE WS] Connected successfully to ${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
-                reconnectAttempt = 0; // Reset backoff on successful connection
-                resetPingTimeout(); // Start watchdog
+                reconnectAttempt = 0;
+                armPingWatchdog(currentSymbol, currentInterval);
             };
 
             ws.onmessage = (event) => {
-                resetPingTimeout();
+                armPingWatchdog(currentSymbol, currentInterval);
                 try {
                     const msg = JSON.parse(event.data) as Record<string, unknown>;
                     if (msg && msg.type === 'heartbeat') {
@@ -158,26 +189,33 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             };
 
             ws.onclose = (event) => {
-                clearTimeout(pingTimeout); // Stop watchdog
+                clearPingWatchdog();
                 if (!cancelled) {
-                    // Fix #3.4 — Exponential backoff: 3s, 6s, 12s, ..., max 30s
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
                     reconnectAttempt++;
-                    console.warn(`[KLINE WS] Closed for ${currentSymbol}@${currentInterval} with code: ${event.code}, reason: ${event.reason}. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempt})`);
+                    console.warn(
+                        `[KLINE WS] Closed for ${currentSymbol}@${currentInterval} with code: ${event.code}, reason: ${event.reason}. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempt})`
+                    );
                     reconnectTimeout = setTimeout(connectWS, delay);
                 } else {
                     console.info(`[KLINE WS] Closed cleanly for ${currentSymbol}@${currentInterval} (component unmounted/changed)`);
                 }
             };
-        };
+        }
 
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', onVisibilityChange);
+        }
         connectWS();
 
         return () => {
             cancelled = true;
             clearTimeout(reconnectTimeout);
+            clearPingWatchdog();
+            if (typeof document !== 'undefined') {
+                document.removeEventListener('visibilitychange', onVisibilityChange);
+            }
             if (wsRef.current) {
-                // Prevent auto-reconnect on legitimate unmount
                 wsRef.current.onclose = null;
                 wsRef.current.close();
             }

@@ -3,6 +3,7 @@ Persist and read klines from MariaDB. Used by the API: DB first, merge latest AP
 """
 import asyncio
 import logging
+import time
 from typing import Any
 
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -16,6 +17,43 @@ logger = logging.getLogger(__name__)
 
 # Recent bars from API merged into DB-backed response so last candle close stays current.
 TAIL_API_LIMIT = 24
+# Max candles to request when bridging DB staleness (Binance paginates; stocks may return less).
+MAX_GAP_FILL_BARS = 10_000
+
+# Binance-style intervals -> seconds (approximate 1M for gap heuristics only).
+_BAR_INTERVAL_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14_400,
+    "1d": 86_400,
+    "1w": 604_800,
+    "1M": 30 * 86_400,
+}
+
+
+def _bar_interval_seconds(bar_interval: str) -> int | None:
+    return _BAR_INTERVAL_SECONDS.get(bar_interval)
+
+
+def _gap_aware_api_fetch_limit(bar_interval: str, newest_db_open_time: int) -> int:
+    """
+    How many most-recent candles to pull from the API so the oldest in that batch
+    reaches (or passes) the bar after newest_db_open_time, closing a hole when the
+    DB fell behind by more than TAIL_API_LIMIT bars.
+    """
+    ise = _bar_interval_seconds(bar_interval)
+    if not ise:
+        return TAIL_API_LIMIT
+    now = int(time.time())
+    t_next = newest_db_open_time + ise
+    if now < t_next:
+        return TAIL_API_LIMIT
+    bars_behind = (now - t_next) // ise + 2
+    return min(MAX_GAP_FILL_BARS, max(TAIL_API_LIMIT, bars_behind))
 
 
 def use_stock_kline_api(symbol: str, asset_type: str) -> bool:
@@ -273,17 +311,29 @@ async def get_klines_db_first(
     """
     Read klines from DB. If none exist, backfill from API.
 
-    When DB has data, fetch a short API tail and merge so the latest bar's OHLC
-    (especially close) matches the market. Tail is upserted into DB.
+    When DB has data, merge in API candles: if the newest DB bar is stale relative
+    to wall clock and interval length, fetch enough history to bridge the gap (capped
+    at MAX_GAP_FILL_BARS); otherwise fetch a short tail only. Merged bars are upserted.
     """
     cached = await asyncio.to_thread(
         _sync_read_only, symbol, asset_type, bar_interval, limit
     )
     if cached:
         api_tail: list[dict] = []
+        newest_db_t = _to_unix_seconds(cached[-1]["time"])
+        fetch_n = _gap_aware_api_fetch_limit(bar_interval, newest_db_t)
+        if fetch_n > TAIL_API_LIMIT:
+            logger.info(
+                "klines gap fill %s %s @ %s: fetching %d API bars (DB newest open_time=%s)",
+                symbol,
+                asset_type,
+                bar_interval,
+                fetch_n,
+                newest_db_t,
+            )
         try:
             api_tail = await fetch_klines_from_api(
-                symbol, asset_type, bar_interval, limit=TAIL_API_LIMIT
+                symbol, asset_type, bar_interval, limit=fetch_n
             )
         except Exception as e:
             logger.debug("API tail fetch failed (non-fatal): %s", e)
