@@ -63,7 +63,7 @@ export default function Home() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const { data, isLoading, isError } = useMarketData(symbol, chartInterval, assetType);
+  const { data, isLoading, isError, wsStatus } = useMarketData(symbol, chartInterval, assetType);
 
   /** Same last bar as the chart / kline stream (REST + WS merged in useMarketData). */
   const lastClose = useMemo(() => {
@@ -187,6 +187,18 @@ export default function Home() {
                 <span className="text-sm font-bold text-white tracking-tight">{symbol}</span>
                 {lastClose != null && (
                   <PriceHighlight price={lastClose} className="text-sm font-bold tabular-nums" />
+                )}
+                {wsStatus !== 'connected' && (
+                  <span
+                    title={wsStatus === 'reconnecting' ? 'Reconnecting to live data...' : 'Live data disconnected'}
+                    className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      wsStatus === 'reconnecting'
+                        ? 'bg-yellow-500/15 text-yellow-400 animate-pulse'
+                        : 'bg-red-500/15 text-red-400'
+                    }`}
+                  >
+                    {wsStatus === 'reconnecting' ? 'Reconnecting' : 'Offline'}
+                  </span>
                 )}
               </div>
               <div className="w-px h-5 bg-gray-700 mx-1" />

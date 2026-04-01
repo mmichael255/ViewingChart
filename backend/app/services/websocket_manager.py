@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import random
+import time
 import websockets
 import redis.asyncio as redis
 from typing import List, Dict, Set
@@ -36,6 +38,30 @@ class ConnectionManager:
         # Track which individual ticker streams are subscribed (Fix #3.3)
         self._subscribed_ticker_streams: Dict[str, Set[str]] = {"spot": set(), "futures": set()}
 
+        # Buffer WS kline updates for periodic DB persistence
+        self._kline_write_buffer: Dict[str, dict] = {}
+
+        # Health / metrics tracking
+        self._spot_connected: bool = False
+        self._futures_connected: bool = False
+        self._last_message_ts: float = 0.0
+        self._spot_reconnect_count: int = 0
+        self._futures_reconnect_count: int = 0
+
+    def get_status(self) -> dict:
+        """Return real-time WS health metrics for the /health and /ws/status endpoints."""
+        return {
+            "spot_connected": self._spot_connected,
+            "futures_connected": self._futures_connected,
+            "last_message_ts": self._last_message_ts,
+            "last_message_age_s": round(time.time() - self._last_message_ts, 1) if self._last_message_ts else None,
+            "spot_reconnect_count": self._spot_reconnect_count,
+            "futures_reconnect_count": self._futures_reconnect_count,
+            "active_streams": len(self.subscribed_streams),
+            "kline_client_count": sum(len(v) for v in self.active_connections.values()),
+            "ticker_client_count": len(self.ticker_connections),
+        }
+
     # ── Client connection management ──────────────────────────────────
 
     async def connect(self, websocket: WebSocket, symbol: str, interval: str):
@@ -53,7 +79,7 @@ class ConnectionManager:
             try:
                 await self.redis.publish("market:cmd_kline_sub", json.dumps({"stream": stream_name}))
             except Exception as e:
-                logger.debug(f"Redis publish failed (kline_sub): {e}")
+                logger.warning(f"Redis publish failed (kline_sub): {e}")
 
     def disconnect(self, websocket: WebSocket, symbol: str, interval: str):
         key = f"{symbol.lower()}_{interval}"
@@ -89,8 +115,7 @@ class ConnectionManager:
                         "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
                     }
                     await ws.send(json.dumps(payload))
-                    logger.info(f"[{tag}] Dynamic Unsubscribe: {stream_name}")
-                    logger.info(f"Unsubscribed from Binance WS: {stream_name}")
+                    logger.info(f"[{tag}] Dynamic unsubscribe: {stream_name}")
                 except Exception as e:
                     logger.error(f"Failed to unsubscribe {stream_name}: {e}")
 
@@ -213,6 +238,9 @@ class ConnectionManager:
                 logger.info("Subscribed to Redis Pub/Sub channels")
 
                 async for message in pubsub.listen():
+                    if not self.running:
+                        break
+
                     if message["type"] == "message":
                         channel = message["channel"]
                         data = json.loads(message["data"])
@@ -238,19 +266,17 @@ class ConnectionManager:
                                     payload = {
                                         "method": "SUBSCRIBE",
                                         "params": [stream_name],
-                                        "id": next(ws_id_counter),  # Fix #3.2 — monotonic ID
+                                        "id": next(ws_id_counter),
                                     }
                                     try:
                                         await ws.send(json.dumps(payload))
                                         self.subscribed_streams.add(stream_name)
-                                        logger.info(f"[{tag}] Dynamic Subscribe: {stream_name}")
-                                        logger.info(f"Dynamically subscribed to Binance WS: {stream_name}")
+                                        logger.info(f"[{tag}] Dynamic subscribe: {stream_name}")
                                     except Exception as e:
                                         logger.error(f"Failed to dynamic subscribe to {stream_name}: {e}")
 
                         elif channel == "market:cmd_ticker_sub":
                             tickers = data.get("symbols", [])
-                            # Rebuild watchlist from all active subscriptions + new ones
                             new_syms = set(self._default_watchlist_syms)
                             new_syms.update(t.upper() for t in tickers)
                             for sub_set in self.ticker_subscriptions.values():
@@ -264,6 +290,9 @@ class ConnectionManager:
                                 await self._update_ticker_streams(added, removed)
 
                             logger.info(f"Global watchlist updated: {len(self.global_watchlist_syms)} symbols tracked.")
+
+                if not self.running:
+                    break
 
             except asyncio.CancelledError:
                 break
@@ -279,6 +308,8 @@ class ConnectionManager:
         Each endpoint manages its own lifecycle so one crash doesn't affect the other.
         """
         tag = "SPOT" if is_spot else "FUTURES"
+        reconnect_attempt = 0
+
         while self.running:
             if not streams:
                 logger.warning(f"[{tag}] No streams to connect, sleeping...")
@@ -289,37 +320,36 @@ class ConnectionManager:
             url = f"{base_url}/stream?streams={stream_string}"
             logger.info(f"[{tag}] Connecting to WS with {len(streams)} streams...")
             logger.debug(f"[{tag}] URL: {url[:120]}...")
-            logger.info(f"Connecting to {tag} WS ({len(streams)} streams)")
 
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=10) as ws:
                     logger.info(f"[{tag}] WebSocket connected!")
+                    reconnect_attempt = 0
                     if is_spot:
                         self.binance_spot_ws = ws
+                        self._spot_connected = True
                     else:
                         self.binance_futures_ws = ws
+                        self._futures_connected = True
 
-                    # Subscribe initial ticker streams once connected (Fix #3.3)
                     await self._subscribe_initial_ticker_streams()
 
                     msg_count = 0
                     while self.running:
-                        # Fix #3.1 — timeout on recv to detect zombie connections
                         try:
-                            # Tickers are frequent; klines alone can be sparse on higher TFs — avoid false reconnects
                             msg = await asyncio.wait_for(ws.recv(), timeout=90)
                         except asyncio.TimeoutError:
-                            logger.error(f"[{tag}] CRITICAL: No data received from Binance in 90s. Connection dead. Forcing reconnect...")
-                            break  # exits inner loop; outer loop reconnects
+                            logger.error(f"[{tag}] No data received in 90s — forcing reconnect")
+                            break
                         except websockets.exceptions.ConnectionClosed as e:
-                            logger.error(f"[{tag}] CRITICAL: Binance closed connection unexpectedly: code={e.code}, reason={e.reason}")
+                            logger.error(f"[{tag}] Binance closed connection: code={e.code}, reason={e.reason}")
                             break
 
+                        self._last_message_ts = time.time()
                         raw_data = json.loads(msg)
                         data = raw_data.get("data", raw_data)
                         msg_count += 1
 
-                        # Handle individual ticker updates (Fix #3.3 — <symbol>@ticker format)
                         if isinstance(data, dict) and "e" in data and data["e"] == "24hrTicker":
                             s = data["s"]
                             if s in self.global_watchlist_syms:
@@ -334,10 +364,9 @@ class ConnectionManager:
                                     await self.redis.publish("market:ticker", json.dumps(update))
                                     await self.redis.hset("binance:tickers", s, json.dumps(update[s]))
                                 except Exception as e:
-                                    logger.debug(f"Redis publish/hset failed (ticker): {e}")
+                                    logger.warning(f"Redis publish/hset failed (ticker): {e}")
                             continue
 
-                        # Handle ticker array (!ticker@arr) — kept as fallback
                         if isinstance(data, list):
                             updates = {}
                             for item in data:
@@ -352,13 +381,12 @@ class ConnectionManager:
                                 try:
                                     await self.redis.publish("market:ticker", json.dumps(updates))
                                 except Exception as e:
-                                    logger.debug(f"Redis publish failed (ticker array): {e}")
+                                    logger.warning(f"Redis publish failed (ticker array): {e}")
                                 if msg_count % 10 == 1:
                                     syms = list(updates.keys())[:5]
                                     logger.debug(f"[{tag}] Ticker update #{msg_count}: {syms} ({len(updates)} symbols)")
                             continue
 
-                        # Handle kline streams
                         if "k" in data:
                             kline = data["k"]
                             symbol = data["s"].lower()
@@ -381,21 +409,40 @@ class ConnectionManager:
                             try:
                                 await self.redis.publish("market:kline", json.dumps(payload))
                             except Exception as e:
-                                logger.debug(f"Redis publish failed (kline): {e}")
+                                logger.warning(f"Redis publish failed (kline): {e}")
+
+                            buf_key = f"{symbol}:{interval}:{formatted_update['time']}"
+                            self._kline_write_buffer[buf_key] = formatted_update
+
                             logger.debug(f"[{tag}] Kline -> {symbol.upper()}@{interval}: close={formatted_update['close']}")
 
             except websockets.exceptions.InvalidURI as e:
                 logger.error(f"[{tag}] Invalid WS URI: {url} - Error: {e}")
-                await asyncio.sleep(5)
             except websockets.exceptions.InvalidHandshake as e:
                 logger.error(f"[{tag}] WS Handshake Failed (Check IP Bans!): {e}")
-                await asyncio.sleep(5)
             except asyncio.CancelledError:
                 logger.warning(f"[{tag}] Stream loop cancelled cleanly.")
                 break
             except Exception as e:
                 logger.error(f"[{tag}] Unhandled WS connection error: type={type(e).__name__}, err={e}")
-                await asyncio.sleep(5)
+            finally:
+                if is_spot:
+                    self._spot_connected = False
+                else:
+                    self._futures_connected = False
+
+            # Exponential backoff with jitter: 5s, 10s, 20s, … capped at 60s
+            if self.running:
+                if is_spot:
+                    self._spot_reconnect_count += 1
+                else:
+                    self._futures_reconnect_count += 1
+                base_delay = min(5 * (2 ** reconnect_attempt), 60)
+                jitter = random.uniform(0, base_delay * 0.3)
+                delay = base_delay + jitter
+                reconnect_attempt += 1
+                logger.info(f"[{tag}] Reconnecting in {delay:.1f}s (attempt {reconnect_attempt})")
+                await asyncio.sleep(delay)
 
     async def _load_symbols(self):
         """Load spot and futures symbol names from Redis. Retries until populated."""
@@ -407,12 +454,10 @@ class ConnectionManager:
                     self._futures_only_syms = {m.lower() for m in futures}
                     self._spot_syms = {m.lower() for m in spot}
                     logger.info(f"Loaded {len(self._spot_syms)} spot and {len(self._futures_only_syms)} futures symbols from Redis")
-                    logger.info(f"Loaded {len(self._spot_syms)} spot and {len(self._futures_only_syms)} futures symbols from Redis")
                     return
                 else:
                     logger.info(f"Symbol lists empty, retrying ({attempt+1}/10)...")
             except Exception as e:
-                logger.error(f"Failed to load symbol lists: {e}")
                 logger.error(f"Failed to load symbol lists from Redis: {e}")
             await asyncio.sleep(2)
 
@@ -420,6 +465,40 @@ class ConnectionManager:
         self._futures_only_syms = {"xauusdt", "xagusdt"}
         self._spot_syms = {"btcusdt", "ethusdt", "solusdt"}
         logger.warning("Could not load symbol lists from Redis, using fallback")
+
+    async def _kline_db_writer(self):
+        """Periodically flush buffered kline updates to MariaDB."""
+        from collections import defaultdict
+        from app.services.klines_db_service import flush_kline_buffer
+
+        while self.running:
+            await asyncio.sleep(30)
+            buf = self._kline_write_buffer
+            self._kline_write_buffer = {}
+            if not buf:
+                continue
+
+            groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+            for buf_key, candle in buf.items():
+                symbol, interval, _ = buf_key.split(":", 2)
+                groups[(symbol.upper(), interval)].append(candle)
+
+            try:
+                total = sum(len(v) for v in groups.values())
+                await asyncio.to_thread(flush_kline_buffer, dict(groups))
+                logger.info(f"Flushed {total} buffered klines to DB ({len(groups)} groups)")
+            except Exception as e:
+                logger.error(f"Background kline DB flush failed: {e}")
+
+    async def _symbol_refresh_loop(self):
+        """Periodically refresh in-memory spot/futures symbol lists from Redis."""
+        while self.running:
+            await asyncio.sleep(30 * 60)
+            try:
+                await self._load_symbols()
+                logger.info("Symbol lists refreshed from Redis")
+            except Exception as e:
+                logger.error(f"Symbol refresh failed: {e}")
 
     async def start_binance_stream(self):
         """
@@ -466,6 +545,8 @@ class ConnectionManager:
         # Launch independent tasks — one crash doesn't kill the other
         asyncio.create_task(self._run_stream_loop(spot_ws_base, spot_streams, is_spot=True))
         asyncio.create_task(self._run_stream_loop(futures_ws_base, futures_streams, is_spot=False))
+        asyncio.create_task(self._kline_db_writer())
+        asyncio.create_task(self._symbol_refresh_loop())
 
         # Keep the coroutine alive so the startup task doesn't exit
         while self.running:

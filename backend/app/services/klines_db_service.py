@@ -2,6 +2,7 @@
 Persist and read klines from MariaDB. Used by the API: DB first, merge latest API tail for live closes.
 """
 import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -12,6 +13,7 @@ from app.database.connection import SessionLocal
 from app.database.models import Symbol, Kline
 from app.services.binance_service import binance_service
 from app.services.stock_service import stock_service
+from app.config import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 TAIL_API_LIMIT = 24
 # Max candles to request when bridging DB staleness (Binance paginates; stocks may return less).
 MAX_GAP_FILL_BARS = 10_000
+# Short-lived response cache so page refreshes don't re-hit the Binance API every time.
+_RESPONSE_CACHE_TTL = 10  # seconds
+# Timeout for the API tail fetch; if exceeded, return DB data and let WS handle freshness.
+_TAIL_FETCH_TIMEOUT = 3.0  # seconds
 
 # Binance-style intervals -> seconds (approximate 1M for gap heuristics only).
 _BAR_INTERVAL_SECONDS: dict[str, int] = {
@@ -285,7 +291,31 @@ def _sync_persist_tail(
         if sym:
             save_klines(db, sym.id, bar_interval, api_tail)
     except Exception as e:
-        logger.debug("persist kline tail skipped: %s", e)
+        logger.warning("persist kline tail skipped: %s", e)
+    finally:
+        db.close()
+
+
+def flush_kline_buffer(groups: dict[tuple[str, str], list[dict]]) -> None:
+    """Batch-persist buffered kline candles from the WS stream.
+
+    `groups` is keyed by (symbol_upper, bar_interval), values are candle dicts.
+    Idempotent via ON DUPLICATE KEY UPDATE (same as save_klines).
+    """
+    db = SessionLocal()
+    try:
+        for (symbol, interval), candles in groups.items():
+            row = infer_symbol_row(symbol, "crypto")
+            upsert_symbol(db, row)
+            sym = (
+                db.query(Symbol)
+                .filter(Symbol.symbol == symbol, Symbol.asset_type == "crypto")
+                .first()
+            )
+            if sym:
+                save_klines(db, sym.id, interval, candles)
+    except Exception as e:
+        logger.exception("flush_kline_buffer failed: %s", e)
     finally:
         db.close()
 
@@ -314,10 +344,32 @@ async def get_klines_db_first(
     When DB has data, merge in API candles: if the newest DB bar is stale relative
     to wall clock and interval length, fetch enough history to bridge the gap (capped
     at MAX_GAP_FILL_BARS); otherwise fetch a short tail only. Merged bars are upserted.
+
+    A short-lived Redis response cache avoids re-hitting the Binance API on page
+    refreshes. The WS keeps the chart up-to-date regardless.
     """
+    t0 = time.monotonic()
+
+    # ── Response cache: instant return for repeated requests ──
+    cache_key = f"klines:resp:{symbol}:{bar_interval}:{asset_type}"
+    try:
+        r = get_redis()
+        cached_resp = await r.get(cache_key)
+        if cached_resp:
+            logger.info(
+                "klines %s %s @ %s → response cache hit (%.0fms)",
+                symbol, asset_type, bar_interval,
+                (time.monotonic() - t0) * 1000,
+            )
+            return json.loads(cached_resp)
+    except Exception:
+        pass
+
     cached = await asyncio.to_thread(
         _sync_read_only, symbol, asset_type, bar_interval, limit
     )
+    t_db = time.monotonic()
+
     if cached:
         api_tail: list[dict] = []
         newest_db_t = _to_unix_seconds(cached[-1]["time"])
@@ -325,25 +377,39 @@ async def get_klines_db_first(
         if fetch_n > TAIL_API_LIMIT:
             logger.info(
                 "klines gap fill %s %s @ %s: fetching %d API bars (DB newest open_time=%s)",
-                symbol,
-                asset_type,
-                bar_interval,
-                fetch_n,
-                newest_db_t,
+                symbol, asset_type, bar_interval, fetch_n, newest_db_t,
             )
         try:
-            api_tail = await fetch_klines_from_api(
-                symbol, asset_type, bar_interval, limit=fetch_n
+            api_tail = await asyncio.wait_for(
+                fetch_klines_from_api(symbol, asset_type, bar_interval, limit=fetch_n),
+                timeout=_TAIL_FETCH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "klines %s %s @ %s → API tail timed out after %.1fs, returning DB data",
+                symbol, asset_type, bar_interval, _TAIL_FETCH_TIMEOUT,
             )
         except Exception as e:
             logger.debug("API tail fetch failed (non-fatal): %s", e)
+
         merged = merge_db_with_api_tail(cached, api_tail, limit)
-        if api_tail:
-            await asyncio.to_thread(
-                _sync_persist_tail, symbol, asset_type, bar_interval, api_tail
-            )
+
+        logger.info(
+            "klines %s %s @ %s → DB %.0fms + API %.0fms = %.0fms (%d candles, tail=%d)",
+            symbol, asset_type, bar_interval,
+            (t_db - t0) * 1000,
+            (time.monotonic() - t_db) * 1000,
+            (time.monotonic() - t0) * 1000,
+            len(merged), len(api_tail),
+        )
+
+        # Cache merged result and persist tail in the background
+        asyncio.create_task(_cache_and_persist(
+            cache_key, merged, symbol, asset_type, bar_interval, api_tail,
+        ))
         return merged
 
+    # DB empty — full backfill from API (no timeout, this needs to complete)
     api_data = await fetch_klines_from_api(
         symbol, asset_type, bar_interval, limit=limit
     )
@@ -351,17 +417,42 @@ async def get_klines_db_first(
         return None
 
     logger.info(
-        "Backfilling klines into DB: %s %s @ %s (%d candles)",
-        symbol,
-        asset_type,
-        bar_interval,
-        len(api_data),
+        "Backfilling klines into DB: %s %s @ %s (%d candles, %.0fms)",
+        symbol, asset_type, bar_interval, len(api_data),
+        (time.monotonic() - t0) * 1000,
     )
-    return await asyncio.to_thread(
-        _sync_backfill_and_read,
-        symbol,
-        asset_type,
-        bar_interval,
-        limit,
-        api_data,
+    result = await asyncio.to_thread(
+        _sync_backfill_and_read, symbol, asset_type, bar_interval, limit, api_data,
     )
+
+    # Cache the backfill result too
+    try:
+        r = get_redis()
+        await r.setex(cache_key, _RESPONSE_CACHE_TTL, json.dumps(result))
+    except Exception:
+        pass
+
+    return result
+
+
+async def _cache_and_persist(
+    cache_key: str,
+    merged: list[dict],
+    symbol: str,
+    asset_type: str,
+    bar_interval: str,
+    api_tail: list[dict],
+) -> None:
+    """Background task: cache the merged response and persist tail to DB."""
+    try:
+        r = get_redis()
+        await r.setex(cache_key, _RESPONSE_CACHE_TTL, json.dumps(merged))
+    except Exception:
+        pass
+    if api_tail:
+        try:
+            await asyncio.to_thread(
+                _sync_persist_tail, symbol, asset_type, bar_interval, api_tail
+            )
+        except Exception:
+            pass

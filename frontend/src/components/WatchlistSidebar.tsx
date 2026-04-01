@@ -6,6 +6,7 @@ import { PriceHighlight } from './Highlighting';
 import { NewsFeed } from './NewsFeed';
 import { API_URL, WS_URL } from '@/config';
 import type { WatchlistItem, TickerData } from '@/types/market';
+import type { WsStatus } from '@/hooks/useMarketData';
 
 interface WatchlistSidebarProps {
     cryptoWatchlist: WatchlistItem[];
@@ -23,6 +24,7 @@ export function WatchlistSidebar({
     setSearchModalMode
 }: WatchlistSidebarProps) {
     const [tickers, setTickers] = useState<Record<string, any>>({});
+    const [tickerWsStatus, setTickerWsStatus] = useState<WsStatus>('disconnected');
     const wsRef = useRef<WebSocket | null>(null);
     const cryptoWatchlistRef = useRef(cryptoWatchlist);
     const stockWatchlistRef = useRef(stockWatchlist);
@@ -169,10 +171,11 @@ export function WatchlistSidebar({
             socket.onopen = () => {
                 console.info(`[Watchlist WS] Connected successfully to ${WS_URL}/market/ws/tickers`);
                 reconnectAttempt = 0;
+                setTickerWsStatus('connected');
                 armPingWatchdog();
                 socket.send(JSON.stringify({
                     action: 'subscribe',
-                    symbols: cryptoWatchlist.map(i => i.sym)
+                    symbols: cryptoWatchlistRef.current.map(i => i.sym)
                 }));
             };
 
@@ -199,6 +202,7 @@ export function WatchlistSidebar({
                 clearPingWatchdog();
 
                 if (!isUnmounted) {
+                    setTickerWsStatus('reconnecting');
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
                     reconnectAttempt++;
                     console.warn(
@@ -206,6 +210,7 @@ export function WatchlistSidebar({
                     );
                     reconnectTimeout = setTimeout(connectWS, delay);
                 } else {
+                    setTickerWsStatus('disconnected');
                     console.info(`[Watchlist WS] Closed cleanly (component unmounted)`);
                 }
             };
@@ -245,7 +250,10 @@ export function WatchlistSidebar({
             <div className="flex flex-col h-full overflow-hidden">
                 <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden relative">
                     <div className="px-4 py-4 border-b border-gray-800 flex justify-between items-center bg-[#1E222D]">
-                        <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest">Watchlist</span>
+                        <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest flex items-center gap-2">
+                            Watchlist
+                            <ConnectionDot status={tickerWsStatus} />
+                        </span>
                         <button
                             onClick={() => setSearchModalMode('add')}
                             className="text-xs font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
@@ -285,6 +293,23 @@ export function WatchlistSidebar({
         </aside>
     );
 }
+
+const ConnectionDot = ({ status }: { status: WsStatus }) => {
+    const config = {
+        connected: { color: 'bg-green-500', label: 'Connected' },
+        reconnecting: { color: 'bg-yellow-500 animate-pulse', label: 'Reconnecting...' },
+        disconnected: { color: 'bg-red-500', label: 'Disconnected' },
+    }[status];
+
+    return (
+        <span title={config.label} className="relative flex h-2 w-2">
+            {status === 'reconnecting' && (
+                <span className="absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75 animate-ping" />
+            )}
+            <span className={`relative inline-flex rounded-full h-2 w-2 ${config.color}`} />
+        </span>
+    );
+};
 
 const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, type }: any) => (
     <>

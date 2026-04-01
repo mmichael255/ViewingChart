@@ -3,7 +3,12 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { API_URL, WS_URL } from '@/config';
 import type { KlineData } from '@/types/market';
 
-const fetcher = (url: string) => fetch(url).then(r => r.json());
+export type WsStatus = 'connected' | 'disconnected' | 'reconnecting';
+
+const fetcher = (url: string) => fetch(url).then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+    return r.json();
+});
 
 export function useMarketData(symbol: string, interval: string = '1d', assetType: string = 'crypto') {
 
@@ -18,6 +23,7 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
     );
 
     const [realtimeData, setRealtimeData] = useState<KlineData[] | undefined>(undefined);
+    const [wsStatus, setWsStatus] = useState<WsStatus>('disconnected');
     const wsRef = useRef<WebSocket | null>(null);
 
     // Refs to prevent stale closures in reconnect callbacks
@@ -167,7 +173,11 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
             ws.onopen = () => {
                 console.info(`[KLINE WS] Connected successfully to ${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
+                if (reconnectAttempt > 0) {
+                    mutate();
+                }
                 reconnectAttempt = 0;
+                setWsStatus('connected');
                 armPingWatchdog(currentSymbol, currentInterval);
             };
 
@@ -191,6 +201,7 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             ws.onclose = (event) => {
                 clearPingWatchdog();
                 if (!cancelled) {
+                    setWsStatus('reconnecting');
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
                     reconnectAttempt++;
                     console.warn(
@@ -198,6 +209,7 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
                     );
                     reconnectTimeout = setTimeout(connectWS, delay);
                 } else {
+                    setWsStatus('disconnected');
                     console.info(`[KLINE WS] Closed cleanly for ${currentSymbol}@${currentInterval} (component unmounted/changed)`);
                 }
             };
@@ -225,6 +237,7 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
     return {
         data: realtimeData || initialData,
         isLoading,
-        isError: error
+        isError: error,
+        wsStatus: assetType === 'crypto' ? wsStatus : ('connected' as WsStatus),
     };
 }
