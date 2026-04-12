@@ -50,6 +50,14 @@ class ConnectionManager:
 
     def get_status(self) -> dict:
         """Return real-time WS health metrics for the /health and /ws/status endpoints."""
+        wl = sorted(self.global_watchlist_syms)
+        streams_sorted = sorted(self.subscribed_streams)
+        room_items = sorted(
+            ((k, len(v)) for k, v in self.active_connections.items()),
+            key=lambda x: (-x[1], x[0]),
+        )[: settings.MONITOR_STATUS_KLINE_ROOMS_CAP]
+        kline_rooms = {k: n for k, n in room_items}
+
         return {
             "spot_connected": self._spot_connected,
             "futures_connected": self._futures_connected,
@@ -60,6 +68,16 @@ class ConnectionManager:
             "active_streams": len(self.subscribed_streams),
             "kline_client_count": sum(len(v) for v in self.active_connections.values()),
             "ticker_client_count": len(self.ticker_connections),
+            "global_watchlist_size": len(self.global_watchlist_syms),
+            "global_watchlist_symbols_sample": wl[: settings.MONITOR_STATUS_SYMBOLS_CAP],
+            "ticker_stream_counts": {
+                "spot": len(self._subscribed_ticker_streams["spot"]),
+                "futures": len(self._subscribed_ticker_streams["futures"]),
+            },
+            "kline_subscribed_stream_names_sample": streams_sorted[: settings.MONITOR_STATUS_STREAMS_CAP],
+            "kline_room_count": len(self.active_connections),
+            "kline_rooms": kline_rooms,
+            "redis_pubsub_channels": list(settings.REDIS_PUBSUB_CHANNELS),
         }
 
     # ── Client connection management ──────────────────────────────────
@@ -245,7 +263,7 @@ class ConnectionManager:
         while self.running:
             try:
                 pubsub = self.redis.pubsub()
-                await pubsub.subscribe("market:ticker", "market:kline", "market:cmd_kline_sub", "market:cmd_ticker_sub")
+                await pubsub.subscribe(*settings.REDIS_PUBSUB_CHANNELS)
                 logger.info("Subscribed to Redis Pub/Sub channels")
 
                 async for message in pubsub.listen():

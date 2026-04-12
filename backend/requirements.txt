@@ -17,3 +17,4 @@ redis
 httpx
 tenacity
 slowapi
+prometheus-client

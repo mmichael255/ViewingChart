@@ -84,7 +84,7 @@ async def request_logger(request: Request, call_next):
 
     # Only log non-WS, non-health requests to keep logs clean
     path = request.url.path
-    if not path.startswith("/health") and "ws" not in path:
+    if not path.startswith("/health") and "ws" not in path and path != "/metrics":
         logger.info(
             f"{request.method} {path} → {response.status_code} ({duration_ms:.1f}ms)"
         )
@@ -95,6 +95,7 @@ async def request_logger(request: Request, call_next):
 # ── Import & register routers ──
 from app.routers import market_data, chat, news
 from app.routers import health as health_router
+from app.routers import metrics_prometheus
 from app.database.connection import engine
 from app.database import models
 
@@ -109,6 +110,9 @@ app.include_router(news.router, prefix="/api/v1")
 # Health check — mounted at both /api/v1/health and /health (for LB probes)
 app.include_router(health_router.router, prefix="/api/v1")
 app.include_router(health_router.router)
+
+# Prometheus scrape — stable path for scrapers (not under /api/v1)
+app.include_router(metrics_prometheus.router)
 
 
 @app.get("/")

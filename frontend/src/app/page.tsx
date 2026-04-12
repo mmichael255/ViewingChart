@@ -13,6 +13,7 @@ import type { TickerData, WatchlistItem } from '@/types/market';
 import { WatchlistSidebar } from '@/components/WatchlistSidebar';
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
 import type { DrawingToolType } from '@/drawing';
+import Link from 'next/link';
 
 const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
@@ -154,6 +155,13 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-3 justify-end w-1/4">
+          <Link
+            href="/monitor"
+            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+            title="Connection monitor"
+          >
+            Monitor
+          </Link>
           <div className="w-7 h-7 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400 cursor-pointer hover:bg-gray-600">👤</div>
         </div>
       </header>

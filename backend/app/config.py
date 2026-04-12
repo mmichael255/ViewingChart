@@ -25,6 +25,18 @@ class Settings:
     # ── Redis ──
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    # Pub/Sub: listener subscribes to these; must match publish/cmd usage in websocket_manager
+    REDIS_PUBSUB_CHANNELS = (
+        "market:ticker",
+        "market:kline",
+        "market:cmd_kline_sub",
+        "market:cmd_ticker_sub",
+    )
+
+    # ── Monitor / health JSON payloads (caps avoid huge responses on busy servers) ──
+    MONITOR_STATUS_SYMBOLS_CAP = int(os.getenv("MONITOR_STATUS_SYMBOLS_CAP", "50"))
+    MONITOR_STATUS_STREAMS_CAP = int(os.getenv("MONITOR_STATUS_STREAMS_CAP", "50"))
+    MONITOR_STATUS_KLINE_ROOMS_CAP = int(os.getenv("MONITOR_STATUS_KLINE_ROOMS_CAP", "40"))
 
     # ── Binance ──
     BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
