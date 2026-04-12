@@ -5,8 +5,13 @@ import { useEffect, useState, useRef } from 'react';
 import { PriceHighlight } from './Highlighting';
 import { NewsFeed } from './NewsFeed';
 import { API_URL, WS_URL } from '@/config';
-import type { WatchlistItem, TickerData } from '@/types/market';
+import type { WatchlistItem } from '@/types/market';
 import type { WsStatus } from '@/hooks/useMarketData';
+import {
+    MARKET_STALE_QUOTES_MS,
+    RESYNC_AFTER_HIDDEN_MS,
+    TRANSPORT_IDLE_TICKER_MS,
+} from '@/lib/connectionResilience';
 
 interface WatchlistSidebarProps {
     cryptoWatchlist: WatchlistItem[];
@@ -41,7 +46,9 @@ export function WatchlistSidebar({
             try {
                 const stocks = stockWatchlist.map(i => i.sym).join(',');
                 const cryptos = cryptoWatchlist.map(i => i.sym).join(',');
-                const res = await fetch(`${API_URL}/market/tickers?stock_symbols=${stocks}&crypto_symbols=${cryptos}`);
+                const res = await fetch(
+                    `${API_URL}/market/tickers?stock_symbols=${stocks}&crypto_symbols=${cryptos}`
+                );
                 const newData = await res.json();
                 if (isActive) {
                     setTickers(prev => ({ ...prev, ...newData }));
@@ -86,28 +93,44 @@ export function WatchlistSidebar({
         let reconnectTimeout: ReturnType<typeof setTimeout>;
         let isUnmounted = false;
         let reconnectAttempt = 0;
-        let pingTimeout: ReturnType<typeof setTimeout>;
+        /** Any frame including heartbeat (transport alive). */
+        let transportTimeout: ReturnType<typeof setTimeout>;
+        /** Non-heartbeat quote payload only. */
+        let marketStaleTimeout: ReturnType<typeof setTimeout>;
         let tabHidden =
             typeof document !== 'undefined' && document.visibilityState === 'hidden';
         let lastHiddenAt = 0;
 
-        function clearPingWatchdog() {
-            clearTimeout(pingTimeout);
+        function clearTransportWatchdog() {
+            clearTimeout(transportTimeout);
         }
 
-        function armPingWatchdog() {
-            clearPingWatchdog();
+        function clearMarketStaleWatchdog() {
+            clearTimeout(marketStaleTimeout);
+        }
+
+        function armTransportWatchdog() {
+            clearTransportWatchdog();
             if (tabHidden || isUnmounted) return;
-            // Only enforced while tab is visible — background tabs throttle JS and WS delivery.
-            pingTimeout = setTimeout(() => {
+            transportTimeout = setTimeout(() => {
                 if (tabHidden || isUnmounted) return;
                 console.error(
-                    '[Watchlist WS] Silent disconnect detected (no data for 60s while tab visible). Forcing reconnect...'
+                    `[Watchlist WS] Transport idle (no frame for ${TRANSPORT_IDLE_TICKER_MS / 1000}s while tab visible). Forcing reconnect...`
                 );
                 if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.close();
                 }
-            }, 60000);
+            }, TRANSPORT_IDLE_TICKER_MS);
+        }
+
+        function armMarketStaleWatchdog() {
+            clearMarketStaleWatchdog();
+            if (tabHidden || isUnmounted) return;
+            marketStaleTimeout = setTimeout(() => {
+                if (tabHidden || isUnmounted) return;
+                console.warn('[Watchlist WS] Market data stale (no quote for 45s). REST snapshot...');
+                void refreshPricesFromRest();
+            }, MARKET_STALE_QUOTES_MS);
         }
 
         async function refreshPricesFromRest() {
@@ -122,6 +145,7 @@ export function WatchlistSidebar({
                 const newData = await res.json();
                 if (!isUnmounted && newData && typeof newData === 'object') {
                     setTickers(prev => ({ ...prev, ...newData }));
+                    armMarketStaleWatchdog();
                 }
             } catch (err) {
                 console.error('[Watchlist] REST refresh after idle failed:', err);
@@ -147,15 +171,17 @@ export function WatchlistSidebar({
             if (document.visibilityState === 'hidden') {
                 lastHiddenAt = Date.now();
                 tabHidden = true;
-                clearPingWatchdog();
+                clearTransportWatchdog();
+                clearMarketStaleWatchdog();
                 return;
             }
             tabHidden = false;
-            armPingWatchdog();
+            armTransportWatchdog();
+            armMarketStaleWatchdog();
             void refreshPricesFromRest();
             const awayMs = lastHiddenAt ? Date.now() - lastHiddenAt : 0;
             // Ticker WS can stay OPEN but stop receiving (proxy / server); kline WS still works.
-            if (lastHiddenAt && awayMs >= 30_000) {
+            if (lastHiddenAt && awayMs >= RESYNC_AFTER_HIDDEN_MS) {
                 reconnectTickerWsSafely();
             } else if (wsRef.current?.readyState === WebSocket.CLOSED && !isUnmounted) {
                 connectWS();
@@ -169,10 +195,15 @@ export function WatchlistSidebar({
             wsRef.current = socket;
 
             socket.onopen = () => {
+                const hadReconnect = reconnectAttempt > 0;
                 console.info(`[Watchlist WS] Connected successfully to ${WS_URL}/market/ws/tickers`);
                 reconnectAttempt = 0;
                 setTickerWsStatus('connected');
-                armPingWatchdog();
+                armTransportWatchdog();
+                armMarketStaleWatchdog();
+                if (hadReconnect) {
+                    void refreshPricesFromRest();
+                }
                 socket.send(JSON.stringify({
                     action: 'subscribe',
                     symbols: cryptoWatchlistRef.current.map(i => i.sym)
@@ -180,13 +211,14 @@ export function WatchlistSidebar({
             };
 
             socket.onmessage = (event) => {
-                armPingWatchdog();
+                armTransportWatchdog();
                 try {
                     const payload = JSON.parse(event.data);
                     if (payload && typeof payload === 'object' && payload.type === 'heartbeat') {
                         return;
                     }
                     if (payload && typeof payload === 'object') {
+                        armMarketStaleWatchdog();
                         setTickers(prev => ({ ...prev, ...payload }));
                     }
                 } catch (e) {
@@ -199,7 +231,8 @@ export function WatchlistSidebar({
             };
 
             socket.onclose = (event) => {
-                clearPingWatchdog();
+                clearTransportWatchdog();
+                clearMarketStaleWatchdog();
 
                 if (!isUnmounted) {
                     setTickerWsStatus('reconnecting');
@@ -224,7 +257,8 @@ export function WatchlistSidebar({
         return () => {
             isUnmounted = true;
             clearTimeout(reconnectTimeout);
-            clearPingWatchdog();
+            clearTransportWatchdog();
+            clearMarketStaleWatchdog();
             if (typeof document !== 'undefined') {
                 document.removeEventListener('visibilitychange', onVisibilityChange);
             }

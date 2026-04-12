@@ -352,21 +352,21 @@ class StockService:
 
             return await asyncio.to_thread(fetch_yfinance_quote)
 
-    async def get_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    async def get_quotes(self, symbols: List[str], use_cache: bool = True) -> Dict[str, Dict[str, Any]]:
         """
         Fetch quotes for multiple stocks with basic caching.
         """
         results = {}
 
         async def fetch_and_cache(sym: str):
-            # Check cache
-            try:
-                cached = await self.redis_client.get(f'stock_quote:{sym}')
-                if cached:
-                    results[sym] = json.loads(cached)
-                    return
-            except Exception as e:
-                logger.debug(f"Redis get failed (stock_quote:{sym}): {e}")
+            if use_cache:
+                try:
+                    cached = await self.redis_client.get(f'stock_quote:{sym}')
+                    if cached:
+                        results[sym] = json.loads(cached)
+                        return
+                except Exception as e:
+                    logger.debug(f"Redis get failed (stock_quote:{sym}): {e}")
 
             # Fetch fresh
             quote = await self.get_quote(sym)
@@ -379,6 +379,17 @@ class StockService:
 
         # Wait for all quote fetches to resolve via asyncio gather
         await asyncio.gather(*(fetch_and_cache(s) for s in symbols))
+
+        if not use_cache:
+            for sym in symbols:
+                if sym in results:
+                    continue
+                try:
+                    cached = await self.redis_client.get(f'stock_quote:{sym}')
+                    if cached:
+                        results[sym] = json.loads(cached)
+                except Exception as e:
+                    logger.debug(f"Redis fallback after force refresh failed for stock {sym}: {e}")
 
         return results
 

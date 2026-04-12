@@ -2,6 +2,11 @@ import useSWR from 'swr';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { API_URL, WS_URL } from '@/config';
 import type { KlineData } from '@/types/market';
+import {
+    RESYNC_AFTER_HIDDEN_MS,
+    TRANSPORT_IDLE_KLINE_MS,
+    klineMarketStaleThresholdMs,
+} from '@/lib/connectionResilience';
 
 export type WsStatus = 'connected' | 'disconnected' | 'reconnecting';
 
@@ -123,35 +128,63 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         let reconnectTimeout: ReturnType<typeof setTimeout>;
         let cancelled = false;
         let reconnectAttempt = 0;
-        let pingTimeout: ReturnType<typeof setTimeout>;
+        /** Transport: any frame including JSON heartbeat. */
+        let transportTimeout: ReturnType<typeof setTimeout>;
+        /** Market: last kline payload only (heartbeats do not reset). */
+        let marketStaleTimeout: ReturnType<typeof setTimeout>;
         // Background tabs throttle timers and delay onmessage; silence watchdog would false-positive.
         let tabHidden =
             typeof document !== 'undefined' && document.visibilityState === 'hidden';
+        let lastHiddenAt = 0;
 
-        function clearPingWatchdog() {
-            clearTimeout(pingTimeout);
+        function clearTransportWatchdog() {
+            clearTimeout(transportTimeout);
         }
 
-        function armPingWatchdog(currentSymbol: string, currentInterval: string) {
-            clearPingWatchdog();
+        function clearMarketStaleWatchdog() {
+            clearTimeout(marketStaleTimeout);
+        }
+
+        function armTransportWatchdog(currentSymbol: string, currentInterval: string) {
+            clearTransportWatchdog();
             if (tabHidden || cancelled) return;
-            pingTimeout = setTimeout(() => {
+            transportTimeout = setTimeout(() => {
                 if (tabHidden || cancelled) return;
                 console.error(
-                    `[KLINE WS] Silent disconnect detected for ${currentSymbol}@${currentInterval} (no message for 75s while tab visible). Forcing reconnect...`
+                    `[KLINE WS] Transport idle for ${currentSymbol}@${currentInterval} (no frame for ${TRANSPORT_IDLE_KLINE_MS / 1000}s while tab visible). Forcing reconnect...`
                 );
                 if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.close();
                 }
-            }, 75000);
+            }, TRANSPORT_IDLE_KLINE_MS);
+        }
+
+        function armMarketStaleWatchdog(currentSymbol: string, currentInterval: string) {
+            clearMarketStaleWatchdog();
+            if (tabHidden || cancelled) return;
+            const ms = klineMarketStaleThresholdMs(currentInterval);
+            marketStaleTimeout = setTimeout(() => {
+                if (tabHidden || cancelled) return;
+                console.warn(
+                    `[KLINE WS] Market data stale for ${currentSymbol}@${currentInterval} (no candle for ${ms / 1000}s). REST resync...`
+                );
+                void mutate();
+            }, ms);
         }
 
         function onVisibilityChange() {
             tabHidden = document.visibilityState === 'hidden';
             if (tabHidden) {
-                clearPingWatchdog();
+                lastHiddenAt = Date.now();
+                clearTransportWatchdog();
+                clearMarketStaleWatchdog();
             } else {
-                armPingWatchdog(symbolRef.current, intervalRef.current);
+                const awayMs = lastHiddenAt ? Date.now() - lastHiddenAt : 0;
+                if (lastHiddenAt && awayMs >= RESYNC_AFTER_HIDDEN_MS) {
+                    void mutate();
+                }
+                armTransportWatchdog(symbolRef.current, intervalRef.current);
+                armMarketStaleWatchdog(symbolRef.current, intervalRef.current);
                 const w = wsRef.current;
                 if (w?.readyState === WebSocket.CLOSED && !cancelled) {
                     connectWS();
@@ -178,16 +211,18 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
                 }
                 reconnectAttempt = 0;
                 setWsStatus('connected');
-                armPingWatchdog(currentSymbol, currentInterval);
+                armTransportWatchdog(currentSymbol, currentInterval);
+                armMarketStaleWatchdog(currentSymbol, currentInterval);
             };
 
             ws.onmessage = (event) => {
-                armPingWatchdog(currentSymbol, currentInterval);
+                armTransportWatchdog(currentSymbol, currentInterval);
                 try {
                     const msg = JSON.parse(event.data) as Record<string, unknown>;
                     if (msg && msg.type === 'heartbeat') {
                         return;
                     }
+                    armMarketStaleWatchdog(currentSymbol, currentInterval);
                     pendingUpdateRef.current = msg as unknown as KlineData;
                 } catch (e) {
                     console.error(`[KLINE WS] JSON parsing error for ${currentSymbol}@${currentInterval}:`, e, "Raw data:", event.data);
@@ -199,7 +234,8 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
             };
 
             ws.onclose = (event) => {
-                clearPingWatchdog();
+                clearTransportWatchdog();
+                clearMarketStaleWatchdog();
                 if (!cancelled) {
                     setWsStatus('reconnecting');
                     const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), 30000);
@@ -223,7 +259,8 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
         return () => {
             cancelled = true;
             clearTimeout(reconnectTimeout);
-            clearPingWatchdog();
+            clearTransportWatchdog();
+            clearMarketStaleWatchdog();
             if (typeof document !== 'undefined') {
                 document.removeEventListener('visibilitychange', onVisibilityChange);
             }
@@ -232,7 +269,7 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
                 wsRef.current.close();
             }
         };
-    }, [symbol, interval, assetType]);
+    }, [symbol, interval, assetType, mutate]);
 
     return {
         data: realtimeData || initialData,

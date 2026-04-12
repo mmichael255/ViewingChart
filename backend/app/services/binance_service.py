@@ -307,7 +307,7 @@ class BinanceService:
             logger.error(f"Error fetching klines from Binance for {symbol}: {e}")
             return []
 
-    async def get_ticker_24h(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    async def get_ticker_24h(self, symbols: List[str], *, use_cache: bool = True) -> Dict[str, Dict[str, Any]]:
         """Fetch 24hr ticker price change statistics for multiple symbols."""
         if not symbols:
             return {}
@@ -316,28 +316,36 @@ class BinanceService:
         if not self._spot_names_cache:
             await self._fetch_exchange_info()
 
-        result = {}
-        missing_spot = []
-        missing_futures = []
+        result: Dict[str, Dict[str, Any]] = {}
+        missing_spot: List[str] = []
+        missing_futures: List[str] = []
 
-        # Try to get from Redis cache first (Fix to avoid 0.00 prices until WS updates)
-        for s in symbols:
-            s_upper = s.upper()
-            try:
-                cached = await self.redis_client.hget("binance:tickers", s_upper)
-            except Exception as e:
-                logger.debug(f"Redis hget failed (binance:tickers): {e}")
-                cached = None
-
-            if cached:
-                result[s_upper] = json.loads(cached)
+        def route_symbol(s_upper: str) -> None:
+            if s_upper in self._spot_names_cache:
+                missing_spot.append(s_upper)
             else:
-                if not self._spot_names_cache:
-                    await self._fetch_exchange_info()
-                if s_upper in self._spot_names_cache:
-                    missing_spot.append(s_upper)
+                missing_futures.append(s_upper)
+
+        if use_cache:
+            # Try Redis first (avoids 0.00 until WS updates); resync paths pass use_cache=False.
+            for s in symbols:
+                s_upper = s.upper()
+                try:
+                    cached = await self.redis_client.hget("binance:tickers", s_upper)
+                except Exception as e:
+                    logger.debug(f"Redis hget failed (binance:tickers): {e}")
+                    cached = None
+
+                if cached:
+                    result[s_upper] = json.loads(cached)
                 else:
-                    missing_futures.append(s_upper)
+                    if not self._spot_names_cache:
+                        await self._fetch_exchange_info()
+                    route_symbol(s_upper)
+        else:
+            for s in symbols:
+                s_upper = s.upper()
+                route_symbol(s_upper)
 
         # Fetch missing spot symbols
         if missing_spot:
@@ -345,7 +353,9 @@ class BinanceService:
                 spot_str = json.dumps(missing_spot, separators=(",", ":"))
                 url = f"{self.BASE_URL}/ticker/24hr"
                 data = await self._fetch_json(url, {"symbols": spot_str})
-                
+                if isinstance(data, dict):
+                    data = [data]
+
                 pipe = self.redis_client.pipeline()
                 for ticker in data:
                     sym = ticker["symbol"].upper()
@@ -366,7 +376,9 @@ class BinanceService:
                 fut_str = json.dumps(missing_futures, separators=(",", ":"))
                 url = f"{settings.BINANCE_FUTURES_API_URL}/ticker/24hr"
                 data = await self._fetch_json(url, {"symbols": fut_str})
-                
+                if isinstance(data, dict):
+                    data = [data]
+
                 pipe = self.redis_client.pipeline()
                 for ticker in data:
                     sym = ticker["symbol"].upper()
@@ -380,6 +392,19 @@ class BinanceService:
                 await pipe.execute()
             except Exception as e:
                 logger.error(f"Error fetching futures 24hr ticker: {e}")
+
+        # If we skipped cache, fill any gaps from Redis so a partial API failure does not wipe UI to 0.
+        if not use_cache:
+            for s in symbols:
+                s_upper = s.upper()
+                if s_upper in result:
+                    continue
+                try:
+                    cached = await self.redis_client.hget("binance:tickers", s_upper)
+                    if cached:
+                        result[s_upper] = json.loads(cached)
+                except Exception as e:
+                    logger.debug(f"Redis fallback after force refresh failed for {s_upper}: {e}")
 
         return result
 

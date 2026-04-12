@@ -109,7 +109,7 @@ async def websocket_tickers(websocket: WebSocket):
             await hb_task
         except asyncio.CancelledError:
             pass
-        manager.disconnect_tickers(websocket)
+        await manager.disconnect_tickers(websocket)
 
 
 async def _ticker_ws_heartbeat(websocket: WebSocket) -> None:
@@ -190,6 +190,10 @@ async def get_tickers(
     request: Request,
     crypto_symbols: str = Query(default="", description="Comma-separated crypto symbols"),
     stock_symbols: str = Query(default="", description="Comma-separated stock symbols"),
+    force_refresh: bool = Query(
+        default=False,
+        description="If true, skip Redis quote cache (use for client resync after stale feed)",
+    ),
 ):
     """Get current price and 24h change for a list of symbols."""
     c_list = parse_symbol_list(crypto_symbols)
@@ -198,11 +202,11 @@ async def get_tickers(
     results = {}
 
     if c_list:
-        c_data = await binance_service.get_ticker_24h(c_list)
+        c_data = await binance_service.get_ticker_24h(c_list, use_cache=not force_refresh)
         results.update(c_data)
 
     if s_list:
-        s_data = await stock_service.get_quotes(s_list)
+        s_data = await stock_service.get_quotes(s_list, use_cache=not force_refresh)
         results.update(s_data)
 
     return results

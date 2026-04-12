@@ -143,11 +143,22 @@ class ConnectionManager:
         if added or removed:
             await self._update_ticker_streams(added, removed)
 
-    def disconnect_tickers(self, websocket: WebSocket):
+    async def disconnect_tickers(self, websocket: WebSocket):
         if websocket in self.ticker_connections:
             self.ticker_connections.remove(websocket)
         if websocket in self.ticker_subscriptions:
             del self.ticker_subscriptions[websocket]
+
+        new_syms = set(self._default_watchlist_syms)
+        for sub_set in self.ticker_subscriptions.values():
+            new_syms.update(sub_set)
+        old_syms = self.global_watchlist_syms
+        self.global_watchlist_syms = new_syms
+        added = new_syms - old_syms
+        removed = old_syms - new_syms
+        if added or removed:
+            await self._update_ticker_streams(added, removed)
+
         logger.info("Client disconnected from global ticker stream")
 
     # ── Per-symbol ticker stream management (Fix #3.3) ────────────────
@@ -211,7 +222,7 @@ class ConnectionManager:
                 await connection.send_json(message)
             except Exception as e:
                 logger.error(f"Error broadcasting ticker to client: {e}")
-                self.disconnect_tickers(connection)
+                await self.disconnect_tickers(connection)
 
     async def broadcast(self, symbol: str, interval: str, message: dict):
         key = f"{symbol.lower()}_{interval}"
@@ -328,9 +339,11 @@ class ConnectionManager:
                     if is_spot:
                         self.binance_spot_ws = ws
                         self._spot_connected = True
+                        self._subscribed_ticker_streams["spot"].clear()
                     else:
                         self.binance_futures_ws = ws
                         self._futures_connected = True
+                        self._subscribed_ticker_streams["futures"].clear()
 
                     await self._subscribe_initial_ticker_streams()
 
