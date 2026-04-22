@@ -8,6 +8,13 @@ if [[ "$MODE" != "dev" && "$MODE" != "prod" ]]; then
   exit 1
 fi
 
+# Load shared environment variables from repository root.
+if [[ -f ".env" ]]; then
+  set -a
+  source .env
+  set +a
+fi
+
 # Start Backend
 echo "Starting Backend (${MODE})..."
 cd backend

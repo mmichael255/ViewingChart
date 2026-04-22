@@ -18,7 +18,7 @@ class LLMService:
 
     async def chat(self, message: str, chart_context: List[Dict[str, Any]] = None) -> str:
         if not self.llm:
-            return "I am a mock AI bot. Please set OPENAI_API_KEY in backend/.env to talk to real AI. " \
+            return "I am a mock AI bot. Please set OPENAI_API_KEY in project root .env to talk to real AI. " \
                    f"I see you sent: '{message}' and I have {len(chart_context) if chart_context else 0} candles of data."
 
         # Summarize context to avoid token limits
