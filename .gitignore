@@ -1,0 +1,55 @@
+# Backend
+backend/venv/
+backend/.venv/
+backend/.env
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Scripts and local test files
+backend/scripts/test_*.py
+backend/tests/
+
+# Local docs
+docs/
+
+# Env files
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.resolved
+*.md.resolved
+.cursor/
+# Backend
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.env
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.resolved
+.env
+backend/tests/
+docs/
+*.md.resolved
+.cursor/
+scripts/
