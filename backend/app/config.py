@@ -2,11 +2,13 @@ import os
 import re
 import itertools
 import logging
+from pathlib import Path
 import redis.asyncio as redis
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from repository root .env
+ROOT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(ROOT_ENV_PATH)
 
 logger = logging.getLogger(__name__)
 

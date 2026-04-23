@@ -11,6 +11,15 @@ interface SymbolSearchProps {
     mode?: 'search' | 'add';
 }
 
+type SearchResultItem = {
+    symbol: string;
+    source?: string;
+    baseAsset?: string;
+    quoteAsset?: string;
+    name?: string;
+    type?: string;
+};
+
 const POPULAR_CRYPTO = [
     { symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT', source: 'Binance' },
     { symbol: 'ETHUSDT', baseAsset: 'ETH', quoteAsset: 'USDT', source: 'Binance' },
@@ -80,11 +89,13 @@ const POPULAR_STOCKS = [
 export function SymbolSearch({ onSelect, placeholder = "Search symbol...", className = "w-48", autoFocus = false, hideIcon = false, inputClassName = "", mode = 'search' }: SymbolSearchProps) {
     const [query, setQuery] = useState('');
     const [assetType, setAssetType] = useState<'crypto' | 'stock'>('crypto');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const [results, setResults] = useState<any[]>([]);
+    const [results, setResults] = useState<SearchResultItem[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [visibleCount, setVisibleCount] = useState(20);
-    const [popularData, setPopularData] = useState<{ crypto: any[], stock: any[] }>({ crypto: POPULAR_CRYPTO, stock: POPULAR_STOCKS });
+    const [popularData, setPopularData] = useState<{ crypto: SearchResultItem[], stock: SearchResultItem[] }>({
+        crypto: POPULAR_CRYPTO,
+        stock: POPULAR_STOCKS,
+    });
 
     useEffect(() => {
         fetch(`${API_URL}/market/popular`)

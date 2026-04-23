@@ -1,6 +1,6 @@
 /**
  * Application-wide configuration constants.
- * Override the defaults via NEXT_PUBLIC_* environment variables in .env.local
+ * Override the defaults via NEXT_PUBLIC_* environment variables (prefer root .env).
  */
 
 export const API_URL =

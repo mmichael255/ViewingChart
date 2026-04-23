@@ -71,7 +71,6 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
     // Instead of calling setRealtimeData on every WS message (1–2 Hz),
     // we buffer the latest update in a ref and flush once per animation frame.
     const pendingUpdateRef = useRef<KlineData | null>(null);
-    const rafIdRef = useRef<number>(0);
 
     const applyUpdate = useCallback((currentData: KlineData[] | undefined, update: KlineData): KlineData[] | undefined => {
         const baseData = currentData || initialDataRef.current;
@@ -101,7 +100,6 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
     useEffect(() => {
         // Use setInterval instead of requestAnimationFrame so updates flush even when tab is backgrounded
-        let intervalId: ReturnType<typeof setInterval>;
         const tick = () => {
             const update = pendingUpdateRef.current;
             if (update) {
@@ -109,7 +107,7 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
                 setRealtimeData(prev => applyUpdate(prev, update));
             }
         };
-        intervalId = setInterval(tick, 100); // Flush max 10 times per second
+        const intervalId = setInterval(tick, 100); // Flush max 10 times per second
 
         return () => {
             clearInterval(intervalId);
