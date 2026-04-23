@@ -1,33 +1,16 @@
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: viewingchart-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: viewingchart-backend
     restart: unless-stopped
-    depends_on:
-      redis:
-        condition: service_healthy
     env_file:
       - ./.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      REDIS_HOST: redis
+      REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
       REDIS_PORT: ${REDIS_PORT:-6379}
     ports:
       - "8000:8000"
@@ -53,5 +36,3 @@ services:
     ports:
       - "3000:3000"
 
-volumes:
-  redis_data:
