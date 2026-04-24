@@ -27,6 +27,8 @@ class Settings:
     # ── Redis ──
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    # Empty string = no AUTH (local dev). Set when Redis has requirepass.
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
     # Pub/Sub: listener subscribes to these; must match publish/cmd usage in websocket_manager
     REDIS_PUBSUB_CHANNELS = (
         "market:ticker",
@@ -99,7 +101,8 @@ def validate_secrets():
     # Log masked keys for debugging
     logger.info(f"[CONFIG] Environment: {settings.ENVIRONMENT}")
     logger.info(f"[CONFIG] CORS Origins: {settings.CORS_ORIGINS}")
-    logger.info(f"[CONFIG] Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+    redis_auth = "auth enabled" if settings.REDIS_PASSWORD else "no password"
+    logger.info(f"[CONFIG] Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT} ({redis_auth})")
     logger.info(f"[CONFIG] AlphaVantage key: {mask_secret(settings.ALPHA_VANTAGE_API_KEY)}")
     logger.info(f"[CONFIG] iTick token: {mask_secret(settings.ITICK_API_TOKEN)}")
 
@@ -108,6 +111,7 @@ def validate_secrets():
 redis_pool = redis.ConnectionPool(
     host=settings.REDIS_HOST,
     port=settings.REDIS_PORT,
+    password=settings.REDIS_PASSWORD or None,
     db=0,
     decode_responses=True,
     max_connections=20,
