@@ -20,6 +20,7 @@ docs/
 
 # Frontend env files
 frontend/.env*
+frontend/.env.production
 
 # Frontend dependencies and build artifacts
 frontend/node_modules/

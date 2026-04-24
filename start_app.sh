@@ -28,7 +28,7 @@ else
 fi
 
 if [[ "$MODE" == "prod" ]]; then
-  uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 &
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 &
 else
   uvicorn app.main:app --reload --port 8000 &
 fi
