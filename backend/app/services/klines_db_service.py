@@ -321,14 +321,23 @@ def flush_kline_buffer(groups: dict[tuple[str, str], list[dict]]) -> None:
 
 
 async def fetch_klines_from_api(
-    symbol: str, asset_type: str, bar_interval: str, limit: int
+    symbol: str,
+    asset_type: str,
+    bar_interval: str,
+    limit: int,
+    start_time: int | None = None,
+    end_time: int | None = None,
 ) -> list[dict]:
     if use_stock_kline_api(symbol, asset_type):
         return await stock_service.get_klines(
             symbol, interval=bar_interval, limit=limit
         )
     return await binance_service.get_klines(
-        symbol, interval=bar_interval, limit=limit
+        symbol,
+        interval=bar_interval,
+        limit=limit,
+        start_time=start_time,
+        end_time=end_time,
     )
 
 

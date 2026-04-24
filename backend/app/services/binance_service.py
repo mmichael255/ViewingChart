@@ -227,12 +227,19 @@ class BinanceService:
             logger.error(f"Error fetching popular cryptos: {e}")
             return []
 
-    async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> List[Dict[str, Any]]:
-        """Fetch K-line data from Binance with Redis caching and pagination for high limits."""
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        limit: int = 100,
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch K-line data from Binance with optional time-bounded range queries."""
         symbol = symbol.upper()
 
         # ── Check Redis cache first ──
-        cache_key = f"klines:binance:{symbol}:{interval}:{limit}"
+        cache_key = f"klines:binance:{symbol}:{interval}:{limit}:{start_time}:{end_time}"
         try:
             cached = await self.redis_client.get(cache_key)
             if cached:
@@ -247,37 +254,70 @@ class BinanceService:
             url = f"{self.BASE_URL}/klines"
 
         all_raw_data = []
-        remaining = limit
-        end_time = None
 
         try:
-            # ── Auto-paginate to bypass Binance's 1000-candle hard limit ──
-            while remaining > 0:
-                batch_limit = min(remaining, 1000)
-                params = {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "limit": batch_limit,
-                }
-                if end_time:
-                    params["endTime"] = end_time
+            # Time-bounded mode: walk forward from start_time to end_time.
+            if start_time is not None or end_time is not None:
+                if start_time is None:
+                    now_ms = int(time.time() * 1000)
+                    start_ms = max(0, now_ms - (max(limit, 1) * 60_000))
+                else:
+                    start_ms = int(start_time * 1000)
+                end_ms = int(end_time * 1000) if end_time is not None else int(time.time() * 1000)
+                remaining = max(limit, 1)
+                cursor_ms = start_ms
 
-                # Fix #1.3 — retry wrapper inside the loop
-                data = await self._fetch_json(url, params)
-                
-                if not data or not isinstance(data, list):
-                    break
+                while remaining > 0 and cursor_ms <= end_ms:
+                    batch_limit = min(remaining, 1000)
+                    params = {
+                        "symbol": symbol,
+                        "interval": interval,
+                        "limit": batch_limit,
+                        "startTime": cursor_ms,
+                        "endTime": end_ms,
+                    }
+                    data = await self._fetch_json(url, params)
 
-                # Binance returns [oldest ... newest]. Prepend to our list.
-                all_raw_data = data + all_raw_data
-                remaining -= len(data)
+                    if not data or not isinstance(data, list):
+                        break
+                    all_raw_data.extend(data)
+                    remaining -= len(data)
+                    if len(data) < batch_limit:
+                        break
 
-                if len(data) < batch_limit:
-                    break # Reached the very beginning of the asset's history
+                    next_cursor = int(data[-1][0]) + 1
+                    if next_cursor <= cursor_ms:
+                        break
+                    cursor_ms = next_cursor
+            else:
+                # ── Auto-paginate to bypass Binance's 1000-candle hard limit ──
+                remaining = limit
+                cursor_end_ms = None
+                while remaining > 0:
+                    batch_limit = min(remaining, 1000)
+                    params = {
+                        "symbol": symbol,
+                        "interval": interval,
+                        "limit": batch_limit,
+                    }
+                    if cursor_end_ms is not None:
+                        params["endTime"] = cursor_end_ms
 
-                # The first item is the oldest candle: data[0][0] is its open time
-                # Wait, data[0][0] is open time. We want the next chunk to end JUST BEFORE this candle.
-                end_time = data[0][0] - 1
+                    # Fix #1.3 — retry wrapper inside the loop
+                    data = await self._fetch_json(url, params)
+
+                    if not data or not isinstance(data, list):
+                        break
+
+                    # Binance returns [oldest ... newest]. Prepend to our list.
+                    all_raw_data = data + all_raw_data
+                    remaining -= len(data)
+
+                    if len(data) < batch_limit:
+                        break
+
+                    # Move window left so next call ends before current oldest candle.
+                    cursor_end_ms = data[0][0] - 1
 
             if not all_raw_data:
                 return []
