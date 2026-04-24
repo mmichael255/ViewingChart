@@ -1,6 +1,6 @@
 import useSWR from 'swr';
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { API_URL, WS_URL } from '@/config';
+import { API_URL, websocketApiBase } from '@/config';
 import type { KlineData } from '@/types/market';
 import {
     RESYNC_AFTER_HIDDEN_MS,
@@ -199,11 +199,12 @@ export function useMarketData(symbol: string, interval: string = '1d', assetType
 
             if (currentAssetType !== 'crypto') return;
 
-            const ws = new WebSocket(`${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
+            const wsBase = websocketApiBase();
+            const ws = new WebSocket(`${wsBase}/market/ws/${currentSymbol}/${currentInterval}`);
             wsRef.current = ws;
 
             ws.onopen = () => {
-                console.info(`[KLINE WS] Connected successfully to ${WS_URL}/market/ws/${currentSymbol}/${currentInterval}`);
+                console.info(`[KLINE WS] Connected successfully to ${wsBase}/market/ws/${currentSymbol}/${currentInterval}`);
                 if (reconnectAttempt > 0) {
                     mutate();
                 }

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from app.rate_limit_key import rate_limit_client_ip
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings, validate_secrets
@@ -24,7 +24,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 # ── Rate limiter ──
-limiter = Limiter(key_func=get_remote_address, default_limits=[settings.RATE_LIMIT])
+limiter = Limiter(key_func=rate_limit_client_ip, default_limits=[settings.RATE_LIMIT])
 
 
 @asynccontextmanager
