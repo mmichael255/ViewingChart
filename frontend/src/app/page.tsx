@@ -7,7 +7,6 @@ import { IndicatorBar, IndicatorConfig, availableIndicators } from '@/components
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef, useMemo } from 'react';
-import { API_URL, WS_URL } from '@/config';
 import type { CandlestickData, Time } from 'lightweight-charts';
 import type { TickerData, WatchlistItem } from '@/types/market';
 import { WatchlistSidebar } from '@/components/WatchlistSidebar';

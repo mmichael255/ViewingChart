@@ -4,7 +4,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { PriceHighlight } from './Highlighting';
 import { NewsFeed } from './NewsFeed';
-import { API_URL, WS_URL } from '@/config';
+import { API_URL, websocketApiBase } from '@/config';
 import type { WatchlistItem } from '@/types/market';
 import type { WsStatus } from '@/hooks/useMarketData';
 import {
@@ -191,12 +191,13 @@ export function WatchlistSidebar({
         function connectWS() {
             if (isUnmounted) return;
 
-            const socket = new WebSocket(`${WS_URL}/market/ws/tickers`);
+            const wsBase = websocketApiBase();
+            const socket = new WebSocket(`${wsBase}/market/ws/tickers`);
             wsRef.current = socket;
 
             socket.onopen = () => {
                 const hadReconnect = reconnectAttempt > 0;
-                console.info(`[Watchlist WS] Connected successfully to ${WS_URL}/market/ws/tickers`);
+                console.info(`[Watchlist WS] Connected successfully to ${wsBase}/market/ws/tickers`);
                 reconnectAttempt = 0;
                 setTickerWsStatus('connected');
                 armTransportWatchdog();

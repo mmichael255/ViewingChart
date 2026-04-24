@@ -5,7 +5,7 @@ import time
 from typing import Literal
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
 from slowapi import Limiter
-from slowapi.util import get_remote_address
+from app.rate_limit_key import rate_limit_client_ip
 from app.services.binance_service import binance_service
 from app.services.stock_service import stock_service
 from app.services.klines_db_service import get_klines_db_first
@@ -13,7 +13,7 @@ from app.services.websocket_manager import manager
 from app.config import VALID_INTERVALS, VALID_ASSET_TYPES, SYMBOL_PATTERN, MAX_SYMBOLS_PER_REQUEST, MAX_SEARCH_QUERY_LENGTH
 
 logger = logging.getLogger(__name__)
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=rate_limit_client_ip)
 
 router = APIRouter(
     prefix="/market",
