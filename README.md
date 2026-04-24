@@ -1,6 +1,7 @@
 # ViewingChart Deployment Notes
 
 This project contains:
+
 - `backend`: FastAPI service (REST + WebSocket)
 - `frontend`: Next.js app
 
@@ -28,10 +29,10 @@ Frontend: `http://localhost:3000`
 ## Production Run (Single Host)
 
 1. Set production environment variables in root `.env`:
-   - `ENVIRONMENT=production`
-   - `LOG_LEVEL=INFO`
-   - `CORS_ORIGINS=https://your-frontend-domain`
-   - production DB/Redis/API credentials
+  - `ENVIRONMENT=production`
+  - `LOG_LEVEL=INFO`
+  - `CORS_ORIGINS=https://your-frontend-domain`
+  - production DB/Redis/API credentials
 2. Start both services:
 
 ```bash
@@ -39,7 +40,8 @@ Frontend: `http://localhost:3000`
 ```
 
 This launches:
-- Backend with `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2`
+
+- Backend with `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1`
 - Frontend with `next build` and `next start`
 
 ## Docker Compose Deployment (Server)
@@ -52,20 +54,19 @@ From repo root:
 cp .env.example .env
 ```
 
-2. Edit `.env` with your server IP/domain and secrets:
-   - `DB_PASSWORD`
-   - `CORS_ORIGINS`
-   - `NEXT_PUBLIC_API_URL`
-   - `NEXT_PUBLIC_WS_URL`
-   - optional API keys
-
-3. Build and start:
+1. Edit `.env` with your server IP/domain and secrets:
+  - `DB_PASSWORD`
+  - `CORS_ORIGINS`
+  - `NEXT_PUBLIC_API_URL`
+  - `NEXT_PUBLIC_WS_URL`
+  - optional API keys
+2. Build and start:
 
 ```bash
 docker compose up -d --build
 ```
 
-4. Verify services:
+1. Verify services:
 
 ```bash
 docker compose ps
@@ -73,11 +74,13 @@ curl http://localhost:8000/health
 ```
 
 Default exposed ports:
+
 - Frontend: `3000`
 - Backend: `8000`
 - Redis: `6379`
 
 If you use a host-installed database (not Docker), set:
+
 - `DB_HOST=host.docker.internal`
 - `DB_PORT=3306`
 
@@ -87,8 +90,75 @@ Stop:
 docker compose down
 ```
 
+## Seed Helpers
+
+Create database only:
+
+```bash
+./seeddb.sh
+```
+
+Backfill kline/candle data via HTTP API:
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install -r requirements.txt
+python seed_candles.py --mode http --symbol BTCUSDT --interval 1h --limit 1000 --asset-type crypto
+```
+
+Collect closed candles via WS and persist:
+
+```bash
+cd backend
+python seed_candles.py --mode ws --symbol BTCUSDT --interval 1m --sample-size 5 --asset-type crypto
+```
+
+If you hit `ModuleNotFoundError` (for example `websockets`), run with the project venv interpreter explicitly:
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode ws --symbol BTCUSDT --interval 1h --sample-size 5 --asset-type crypto
+```
+
+Auto fill gaps (tail + internal scan by default):
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode fill-gaps --symbol BTCUSDT --interval 1h --asset-type crypto
+```
+
+Fill behavior (current implementation):
+
+- Tail fill: extends from newest DB candle to latest closed candle.
+- Internal scan: segmented full-history scan by default (ascending `open_time`).
+- Internal fetch: each detected gap is backfilled with time-bounded API requests (`startTime/endTime`) for that gap span.
+- Upsert semantics: duplicate candles update existing rows via unique key `(symbol_id, bar_interval, open_time)`.
+
+Optional switches for fill mode:
+
+- `--scan-window 5000`: internal scan segment size (rows per DB batch) for full-history scanning
+- `--scan-start-time yyyymmddHHmmss`: optional internal scan start (UTC, 24h). If omitted, uses earliest DB candle time.
+- `--scan-end-time yyyymmddHHmmss`: optional internal scan end (UTC, 24h). If omitted, uses latest DB candle time.
+- `--no-tail`: skip tail-gap filling (only internal scan)
+- `--no-internal`: skip internal scan (only tail-gap filling)
+- `--dry-run`: print gap-fill plan (would-save counts) without writing to DB
+
+Dry run examples:
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode fill-gaps --symbol BTCUSDT --interval 1h --asset-type crypto --dry-run
+```
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode fill-gaps --symbol BTCUSDT --interval 1h --asset-type crypto --scan-start-time 20260413000000 --scan-end-time 20260420000000 --dry-run
+```
+
 ## Basic Health Checks
 
 - Backend health: `GET /health`
 - API docs: `GET /docs`
 - Metrics: `GET /metrics`
+
