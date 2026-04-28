@@ -325,12 +325,13 @@ async def fetch_klines_from_api(
     asset_type: str,
     bar_interval: str,
     limit: int,
+    include_extended: bool = False,
     start_time: int | None = None,
     end_time: int | None = None,
 ) -> list[dict]:
     if use_stock_kline_api(symbol, asset_type):
         return await stock_service.get_klines(
-            symbol, interval=bar_interval, limit=limit
+            symbol, interval=bar_interval, limit=limit, include_extended=include_extended
         )
     return await binance_service.get_klines(
         symbol,
@@ -346,6 +347,7 @@ async def get_klines_db_first(
     bar_interval: str,
     asset_type: str,
     limit: int = 5000,
+    include_extended: bool = False,
 ) -> list[dict] | None:
     """
     Read klines from DB. If none exist, backfill from API.
@@ -360,7 +362,7 @@ async def get_klines_db_first(
     t0 = time.monotonic()
 
     # ── Response cache: instant return for repeated requests ──
-    cache_key = f"klines:resp:{symbol}:{bar_interval}:{asset_type}"
+    cache_key = f"klines:resp:{symbol}:{bar_interval}:{asset_type}:ext:{1 if include_extended else 0}"
     try:
         r = get_redis()
         cached_resp = await r.get(cache_key)
@@ -390,7 +392,7 @@ async def get_klines_db_first(
             )
         try:
             api_tail = await asyncio.wait_for(
-                fetch_klines_from_api(symbol, asset_type, bar_interval, limit=fetch_n),
+                fetch_klines_from_api(symbol, asset_type, bar_interval, limit=fetch_n, include_extended=include_extended),
                 timeout=_TAIL_FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -420,7 +422,7 @@ async def get_klines_db_first(
 
     # DB empty — full backfill from API (no timeout, this needs to complete)
     api_data = await fetch_klines_from_api(
-        symbol, asset_type, bar_interval, limit=limit
+        symbol, asset_type, bar_interval, limit=limit, include_extended=include_extended
     )
     if not api_data:
         return None

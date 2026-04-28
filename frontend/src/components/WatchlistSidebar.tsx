@@ -1,17 +1,17 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { PriceHighlight } from './Highlighting';
 import { NewsFeed } from './NewsFeed';
 import { API_URL, websocketApiBase } from '@/config';
-import type { WatchlistItem } from '@/types/market';
+import type { TickerData, WatchlistItem } from '@/types/market';
 import type { WsStatus } from '@/hooks/useMarketData';
 import {
     MARKET_STALE_QUOTES_MS,
     RESYNC_AFTER_HIDDEN_MS,
     TRANSPORT_IDLE_TICKER_MS,
 } from '@/lib/connectionResilience';
+import { buildPrePostSegments, formatPrePostDelta } from '@/lib/prepost';
 
 interface WatchlistSidebarProps {
     cryptoWatchlist: WatchlistItem[];
@@ -19,6 +19,12 @@ interface WatchlistSidebarProps {
     symbol: string;
     handleSymbolChange: (newSymbol: string, type: string) => void;
     setSearchModalMode: (mode: 'closed' | 'search' | 'add') => void;
+    /**
+     * Fires when the ticker for the currently displayed `symbol` changes
+     * (by reference). Crypto WS frames that don't touch `symbol` won't fire
+     * this — keeps the parent free from per-tick re-renders.
+     */
+    onSelectedTickerChange?: (ticker: TickerData | undefined) => void;
 }
 
 export function WatchlistSidebar({
@@ -26,9 +32,10 @@ export function WatchlistSidebar({
     stockWatchlist,
     symbol,
     handleSymbolChange,
-    setSearchModalMode
+    setSearchModalMode,
+    onSelectedTickerChange,
 }: WatchlistSidebarProps) {
-    const [tickers, setTickers] = useState<Record<string, any>>({});
+    const [tickers, setTickers] = useState<Record<string, TickerData>>({});
     const [tickerWsStatus, setTickerWsStatus] = useState<WsStatus>('disconnected');
     const wsRef = useRef<WebSocket | null>(null);
     const cryptoWatchlistRef = useRef(cryptoWatchlist);
@@ -37,6 +44,15 @@ export function WatchlistSidebar({
         cryptoWatchlistRef.current = cryptoWatchlist;
         stockWatchlistRef.current = stockWatchlist;
     });
+
+    // Only push updates upward when the active symbol's ticker reference
+    // actually changes — `setTickers({...prev, ...payload})` keeps the value
+    // reference stable for symbols not in the payload, so React bails on
+    // duplicate setState in the parent.
+    const selectedTicker = tickers[symbol];
+    useEffect(() => {
+        onSelectedTickerChange?.(selectedTicker);
+    }, [selectedTicker, onSelectedTickerChange]);
 
     useEffect(() => {
         let timeoutId: number;
@@ -268,7 +284,6 @@ export function WatchlistSidebar({
                 wsRef.current.close();
             }
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Initialize once
 
     useEffect(() => {
@@ -346,38 +361,87 @@ const ConnectionDot = ({ status }: { status: WsStatus }) => {
     );
 };
 
-const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, type }: any) => (
+function StockPrePostSecondRow({ ticker }: { ticker: TickerData }) {
+    const segments = buildPrePostSegments(ticker);
+    if (segments.length === 0) return null;
+
+    return (
+        <div className="px-3 pb-2 -mt-0.5 text-[9px] leading-tight">
+            {segments.map((seg) => {
+                const labelClass = seg.isActiveSession
+                    ? 'text-blue-300 font-black uppercase tracking-tight'
+                    : 'text-gray-500 font-black uppercase tracking-tight';
+                let deltaEl: React.ReactElement;
+                if (seg.delta === null) {
+                    deltaEl = <span className="text-gray-600"> —</span>;
+                } else {
+                    const colorClass = seg.delta >= 0 ? 'text-green-400' : 'text-red-400';
+                    deltaEl = (
+                        <span className={`tabular-nums font-medium ${colorClass}`}>
+                            {formatPrePostDelta(seg)}
+                        </span>
+                    );
+                }
+                return (
+                    <span
+                        key={seg.kind}
+                        className="inline-flex flex-wrap items-baseline gap-0.5 mr-3 last:mr-0"
+                    >
+                        <span className={labelClass}>{seg.label}</span>
+                        <span className="text-gray-300 tabular-nums">{seg.price.toFixed(2)}</span>
+                        {deltaEl}
+                    </span>
+                );
+            })}
+        </div>
+    );
+}
+
+interface WatchlistGroupProps {
+    title: string;
+    items: WatchlistItem[];
+    tickers: Record<string, TickerData>;
+    handleSymbolChange: (newSymbol: string, type: string) => void;
+    symbol: string;
+    type: string;
+}
+
+const EMPTY_TICKER: TickerData = { lastPrice: 0, priceChange: 0, priceChangePercent: 0 };
+
+const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, type }: WatchlistGroupProps) => (
     <>
         <div className="px-3 py-1 mb-1 mt-2">
             <span className="text-[9px] font-black text-[#2962FF] uppercase tracking-widest">{title}</span>
         </div>
-        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-        {items.map(({ sym, label, sub, source }: any) => {
-            const ticker = tickers[sym] || {};
-            const isUp = (ticker.priceChange || 0) >= 0;
+        {items.map(({ sym, label, sub, source }) => {
+            const ticker: TickerData = tickers[sym] ?? EMPTY_TICKER;
+            const isUp = ticker.priceChange >= 0;
             const colorClass = isUp ? 'text-green-400' : 'text-red-400';
             return (
                 <button
                     key={sym}
                     onClick={() => handleSymbolChange(sym, type)}
-                    className={`w-full grid grid-cols-12 items-center px-3 py-2 rounded mb-0.5 transition-all outline-none group ${symbol === sym ? 'bg-[#2962FF]/10' : 'hover:bg-gray-800/40'}`}
+                    className={`w-full block rounded mb-0.5 transition-all outline-none group text-left ${symbol === sym ? 'bg-[#2962FF]/10' : 'hover:bg-gray-800/40'}`}
                 >
-                    <div className="col-span-4 text-left">
-                        <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
-                        <div className="text-[8px] text-gray-500 font-medium truncate mt-0.5 flex items-center gap-1">
-                            <span>{sub}</span>
-                            {source && <span className="text-[7px] uppercase bg-gray-800 px-1 py-0.5 rounded text-gray-400 tracking-widest">{source}</span>}
+                    <div className="grid grid-cols-12 items-center px-3 py-2">
+                        <div className="col-span-4 text-left">
+                            <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
+                            <div className="text-[8px] text-gray-500 font-medium truncate mt-0.5 flex items-center gap-1">
+                                <span>{sub}</span>
+                                {source && <span className="text-[7px] uppercase bg-gray-800 px-1 py-0.5 rounded text-gray-400 tracking-widest">{source}</span>}
+                            </div>
+                        </div>
+                        <div className="col-span-3 text-right">
+                            <PriceHighlight price={ticker.lastPrice} className="text-[11px] font-bold" />
+                        </div>
+                        <div className={`col-span-2 text-right text-[10px] font-medium ${colorClass}`}>
+                            {ticker.priceChange ? (ticker.priceChange > 0 ? '+' : '') + ticker.priceChange.toFixed(2) : '0.00'}
+                        </div>
+                        <div className={`col-span-3 text-right text-[10px] font-bold ${colorClass}`}>
+                            {ticker.priceChangePercent ? (ticker.priceChangePercent > 0 ? '+' : '') + ticker.priceChangePercent.toFixed(2) + '%' : '0.00%'}
                         </div>
                     </div>
-                    <div className="col-span-3 text-right">
-                        <PriceHighlight price={ticker.lastPrice || 0} className="text-[11px] font-bold" />
-                    </div>
-                    <div className={`col-span-2 text-right text-[10px] font-medium ${colorClass}`}>
-                        {ticker.priceChange ? (ticker.priceChange > 0 ? '+' : '') + ticker.priceChange.toFixed(2) : '0.00'}
-                    </div>
-                    <div className={`col-span-3 text-right text-[10px] font-bold ${colorClass}`}>
-                        {ticker.priceChangePercent ? (ticker.priceChangePercent > 0 ? '+' : '') + ticker.priceChangePercent.toFixed(2) + '%' : '0.00%'}
-                    </div>
+                    {type === 'stock' && <StockPrePostSecondRow ticker={ticker} />}
                 </button>
             );
         })}

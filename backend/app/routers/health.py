@@ -2,6 +2,7 @@ import time
 import logging
 from fastapi import APIRouter
 from app.config import get_redis, settings
+from app.services.stock_service import stock_service
 from app.services.websocket_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -50,4 +51,7 @@ async def ws_status():
     """Real-time WebSocket metrics: connection state, reconnect counts, message rates, client counts."""
     status = manager.get_status()
     status["uptime_seconds"] = round(time.time() - _start_time, 1)
+    stock_metrics = stock_service.get_metrics_snapshot()
+    status["stock_quote_metrics"] = stock_metrics
+    status["stock_regular_only_mode"] = stock_metrics.get("regular_only_mode_enabled", False)
     return status

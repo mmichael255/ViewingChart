@@ -1,11 +1,13 @@
-import time
 import httpx
 import json
 import asyncio
 import logging
+import os
+from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo
 import redis.asyncio as redis
 import yfinance as yf
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Literal
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config import settings, get_redis
 
@@ -24,10 +26,34 @@ class StockService:
 
         # Shared Redis pool (Fix #2.1)
         self.redis_client = get_redis()
-        self.cache_duration = 300  # 5 minutes (Fix #2.4 — raised from 60s)
+        self.stock_quote_ttl_active = settings.STOCK_QUOTE_TTL_ACTIVE
+        self.stock_quote_ttl_closed = settings.STOCK_QUOTE_TTL_CLOSED
+        self.stock_quote_failure_ttl = settings.STOCK_QUOTE_FAILURE_TTL
+        self.stock_regular_only_mode = settings.STOCK_REGULAR_ONLY_MODE
         self.search_cache_duration = 3600
         # Shared HTTP client — reuse TCP connections (Fix #1.1 — used everywhere now)
         self.http_client = httpx.AsyncClient(timeout=15.0)
+        self._stats: Dict[str, Any] = {
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "upstream_success": 0,
+            "upstream_failure": 0,
+            "upstream_failure_timeout": 0,
+            "upstream_failure_rate_limit": 0,
+            "upstream_failure_empty_payload": 0,
+            "upstream_failure_missing_fields": 0,
+            "upstream_latency_ms_total": 0.0,
+            "upstream_latency_samples": 0,
+            "upstream_latency_p95_ms": 0.0,
+            "pre_market_coverage_total": 0,
+            "pre_market_coverage_available": 0,
+            "post_market_coverage_total": 0,
+            "post_market_coverage_available": 0,
+            "fallback_cache_used": 0,
+            "fallback_lastgood_used": 0,
+            "regular_only_mode_hits": 0,
+        }
+        self._latency_samples: list[float] = []
 
     async def close(self):
         """Gracefully close the HTTP client (Fix #1.2)."""
@@ -109,6 +135,135 @@ class StockService:
         }
         return mapping.get(interval, "DAILY")
 
+    def _stock_quote_ttl_seconds(self) -> int:
+        """
+        Dynamic TTL for stock quotes:
+        - Weekday US windows (pre / overnight / regular / post): shorter TTL.
+        - Weekend: longer TTL.
+        """
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:  # Sat/Sun
+            return self.stock_quote_ttl_closed
+        return self.stock_quote_ttl_active
+
+    @staticmethod
+    def _current_session_et() -> Literal["pre", "regular", "post", "overnight", "closed"]:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
+            return "closed"
+        t = now_et.time()
+        if t >= dt_time(20, 0) or t < dt_time(4, 0):
+            return "overnight"
+        if dt_time(4, 0) <= t < dt_time(9, 30):
+            return "pre"
+        if dt_time(9, 30) <= t < dt_time(16, 0):
+            return "regular"
+        if dt_time(16, 0) <= t < dt_time(20, 0):
+            return "post"
+        return "closed"
+
+    def _record_stat(self, key: str, delta: int | float = 1) -> None:
+        self._stats[key] = self._stats.get(key, 0) + delta
+
+    def _regular_only_mode_enabled(self) -> bool:
+        # Hot-read env to allow quick operational rollback without restart.
+        raw = os.getenv("STOCK_REGULAR_ONLY_MODE")
+        if raw is None:
+            return self.stock_regular_only_mode
+        return raw.lower() in {"1", "true", "yes", "on"}
+
+    def _record_latency(self, ms: float) -> None:
+        self._record_stat("upstream_latency_ms_total", ms)
+        self._record_stat("upstream_latency_samples", 1)
+        self._latency_samples.append(ms)
+        if len(self._latency_samples) > 200:
+            self._latency_samples.pop(0)
+        s = sorted(self._latency_samples)
+        idx = max(0, min(len(s) - 1, int(len(s) * 0.95) - 1))
+        self._stats["upstream_latency_p95_ms"] = s[idx] if s else 0.0
+
+    @staticmethod
+    def _safe_float(v: Any) -> float | None:
+        try:
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _quote_from_prices(
+        self,
+        *,
+        session: Literal["pre", "regular", "post", "overnight", "closed"],
+        regular_price: float,
+        prev_close: float,
+        pre_market_price: float | None,
+        post_market_price: float | None,
+        overnight_market_price: float | None,
+        as_of: int,
+    ) -> Dict[str, Any]:
+        # NOTE — current semantics of STOCK_REGULAR_ONLY_MODE:
+        #   * It ONLY decides whether `lastPrice` follows pre/post/overnight during
+        #     extended hours, or stays pinned to the regular-session close.
+        #   * It does NOT strip `preMarketPrice` / `postMarketPrice` /
+        #     `overnightMarketPrice` from the payload — those are still returned
+        #     so the frontend can surface them next to the chart and watchlist.
+        # If a future need arises to actually hide extended fields, add a
+        # separate flag (e.g. STOCK_HIDE_EXTENDED_FIELDS) rather than
+        # overloading this one.
+        current_price = regular_price
+        regular_only = self._regular_only_mode_enabled()
+        if regular_only:
+            self._record_stat("regular_only_mode_hits")
+        if not regular_only:
+            if session == "pre" and pre_market_price is not None:
+                current_price = pre_market_price
+            elif session == "post" and post_market_price is not None:
+                current_price = post_market_price
+            elif session == "overnight" and overnight_market_price is not None:
+                current_price = overnight_market_price
+
+        baseline = prev_close
+        change = current_price - baseline
+        change_pct = (change / baseline) * 100 if baseline else 0
+
+        if pre_market_price is not None:
+            self._record_stat("pre_market_coverage_available")
+        self._record_stat("pre_market_coverage_total")
+        if post_market_price is not None:
+            self._record_stat("post_market_coverage_available")
+        self._record_stat("post_market_coverage_total")
+
+        quote = {
+            "lastPrice": current_price,
+            "priceChange": change,
+            "priceChangePercent": change_pct,
+            "session": session,
+            "preMarketPrice": pre_market_price,
+            "postMarketPrice": post_market_price,
+            "overnightMarketPrice": overnight_market_price,
+            "previousClose": prev_close,
+            "baselinePrice": baseline,
+            "asOf": as_of,
+        }
+        return self._normalize_quote(quote)
+
+    @staticmethod
+    def _normalize_quote(raw: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "lastPrice": float(raw.get("lastPrice", 0)),
+            "priceChange": float(raw.get("priceChange", 0)),
+            "priceChangePercent": float(raw.get("priceChangePercent", 0)),
+            "session": raw.get("session", "regular"),
+            "preMarketPrice": raw.get("preMarketPrice"),
+            "postMarketPrice": raw.get("postMarketPrice"),
+            "overnightMarketPrice": raw.get("overnightMarketPrice"),
+            "previousClose": raw.get("previousClose"),
+            "baselinePrice": raw.get("baselinePrice"),
+            "asOf": raw.get("asOf"),
+            "isStale": bool(raw.get("isStale", False)),
+        }
+
     @staticmethod
     def _aggregate_candles(candles: List[Dict[str, Any]], factor: int) -> List[Dict[str, Any]]:
         """
@@ -133,9 +288,84 @@ class StockService:
             })
         return aggregated
 
-    async def _get_yf_klines(self, symbol: str, interval: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _filter_regular_session_intraday(
+        candles: List[Dict[str, Any]],
+        tz: ZoneInfo,
+    ) -> List[Dict[str, Any]]:
+        """
+        Keep only US regular-session intraday bars (9:30–16:00 ET) and drop obvious
+        non-trading placeholders (e.g. volume=0).
+        """
+        out: List[Dict[str, Any]] = []
+        for c in candles:
+            try:
+                ts = int(c["time"])
+                vol = float(c.get("volume") or 0)
+            except Exception:
+                continue
+            if vol <= 0:
+                continue
+            dt_et = datetime.fromtimestamp(ts, tz=tz)
+            if dt_et.weekday() >= 5:
+                continue
+            t = dt_et.time()
+            if dt_time(9, 30) <= t < dt_time(16, 0):
+                out.append(c)
+        return out
+
+    @staticmethod
+    def _aggregate_candles_by_day(
+        candles: List[Dict[str, Any]],
+        factor: int,
+        tz: ZoneInfo,
+    ) -> List[Dict[str, Any]]:
+        """
+        Aggregate by fixed-size groups but never across ET day boundaries.
+        This avoids creating impossible 4h bars when there are overnight gaps.
+        """
+        if factor <= 1 or not candles:
+            return candles
+
+        aggregated: List[Dict[str, Any]] = []
+        i = 0
+        while i < len(candles):
+            base_day = datetime.fromtimestamp(int(candles[i]["time"]), tz=tz).date()
+            group: List[Dict[str, Any]] = []
+            while i < len(candles) and len(group) < factor:
+                day = datetime.fromtimestamp(int(candles[i]["time"]), tz=tz).date()
+                if day != base_day:
+                    break
+                group.append(candles[i])
+                i += 1
+
+            if group:
+                aggregated.append(
+                    {
+                        "time": group[0]["time"],
+                        "open": group[0]["open"],
+                        "high": max(c["high"] for c in group),
+                        "low": min(c["low"] for c in group),
+                        "close": group[-1]["close"],
+                        "volume": sum(c["volume"] for c in group),
+                    }
+                )
+
+            # If we stopped because the day changed, the next loop iteration will
+            # start a new group on the new day.
+            while i < len(candles):
+                next_day = datetime.fromtimestamp(int(candles[i]["time"]), tz=tz).date()
+                if next_day == base_day:
+                    break
+                # Skip any unexpected out-of-order rows that still belong to base_day
+                break
+
+        return aggregated
+
+    async def _get_yf_klines(self, symbol: str, interval: str, limit: int = 1000, include_extended: bool = False) -> List[Dict[str, Any]]:
         yf_interval = self._map_yf_interval(interval)
         needs_aggregation = interval == "4h"
+        tz_et = ZoneInfo("America/New_York")
 
         # yfinance has strict limits on historical data for intraday intervals
         period = "max"
@@ -147,7 +377,8 @@ class StockService:
         # Fetch data asynchronously using thread pool since yfinance is blocking
         def fetch_yf():
             ticker = yf.Ticker(symbol)
-            return ticker.history(period=period, interval=yf_interval)
+            # prepost only affects intraday bars.
+            return ticker.history(period=period, interval=yf_interval, prepost=include_extended)
 
         try:
             df = await asyncio.to_thread(fetch_yf)
@@ -170,14 +401,19 @@ class StockService:
                 "volume": float(row["Volume"])
             })
 
+        # If extended hours are disabled, drop pre/post/overnight intraday bars.
+        # Apply BEFORE aggregation so 4h bars don't cross non-trading gaps.
+        if not include_extended and interval in {"1m", "3m", "5m", "15m", "30m", "1h", "4h"}:
+            formatted_data = self._filter_regular_session_intraday(formatted_data, tz_et)
+
         # Aggregate 4 × 1h → 4h if needed (Fix #4.3)
         if needs_aggregation:
-            formatted_data = self._aggregate_candles(formatted_data, 4)
+            formatted_data = self._aggregate_candles_by_day(formatted_data, 4, tz_et)
 
         # Return only the requested limit
         return formatted_data[-limit:]
 
-    async def _get_av_klines(self, symbol: str, interval: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    async def _get_av_klines(self, symbol: str, interval: str, limit: int = 1000, include_extended: bool = False) -> List[Dict[str, Any]]:
         if not self.alphavantage_api_key:
             logger.warning("Alpha Vantage API key missing")
             return []
@@ -255,13 +491,19 @@ class StockService:
             logger.error(f"Error fetching Alpha Vantage data: {e}")
             return []
 
-    async def get_klines(self, symbol: str, interval: str = "4h", limit: int = 1000) -> List[Dict[str, Any]]:
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str = "4h",
+        limit: int = 1000,
+        include_extended: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Fetch historical kline data with Redis caching (Fix #2.2).
         Routes to yfinance or Alpha Vantage.
         """
         # ── Check Redis cache first (Fix #2.2) ──
-        cache_key = f"klines:stock:{symbol}:{interval}:{limit}"
+        cache_key = f"klines:stock:{symbol}:{interval}:{limit}:ext:{1 if include_extended else 0}"
         try:
             cached = await self.redis_client.get(cache_key)
             if cached:
@@ -270,9 +512,9 @@ class StockService:
             logger.debug(f"Redis get failed ({cache_key}): {e}")
 
         if self._is_alphavantage_symbol(symbol):
-             data = await self._get_av_klines(symbol, interval, limit)
+             data = await self._get_av_klines(symbol, interval, limit, include_extended=include_extended)
         else:
-             data = await self._get_yf_klines(symbol, interval, limit)
+             data = await self._get_yf_klines(symbol, interval, limit, include_extended=include_extended)
 
         # ── Cache with interval-aware TTL (Fix #2.2) ──
         if data:
@@ -289,6 +531,9 @@ class StockService:
         """
         Fetch real-time quote for a single asset.
         """
+        t0 = datetime.now().timestamp()
+        session = self._current_session_et()
+        as_of = int(datetime.now(ZoneInfo("America/New_York")).timestamp())
         if self._is_alphavantage_symbol(symbol):
             # Alpha Vantage Realtime FX
             ftype, from_sym, to_sym = self._format_alphavantage_symbol(symbol)
@@ -303,54 +548,148 @@ class StockService:
                 res = await self._fetch_json(self.alphavantage_base_url, params=params)
                 if "Realtime Currency Exchange Rate" in res:
                     rate = float(res["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
-                    return {
+                    return self._normalize_quote({
                         "lastPrice": rate,
                         "priceChange": 0,
-                        "priceChangePercent": 0
-                    }
+                        "priceChangePercent": 0,
+                        "session": session,
+                        "preMarketPrice": None,
+                        "postMarketPrice": None,
+                        "overnightMarketPrice": None,
+                        "previousClose": rate,
+                        "baselinePrice": rate,
+                        "asOf": as_of,
+                    })
             except Exception as e:
                  logger.error(f"AV Quote Error: {symbol} - {e}")
+            self._record_stat("upstream_failure")
             return {}
         else:
             # yfinance quote
             def fetch_yfinance_quote():
                 try:
                     ticker = yf.Ticker(symbol)
-                    last_price = None
+                    regular_price = None
                     prev_close = None
+                    pre_market_price = None
+                    post_market_price = None
+                    overnight_market_price = None
+
+                    _info_cache: list[Dict[str, Any] | None] = [None]
+
+                    def load_info() -> Dict[str, Any]:
+                        if _info_cache[0] is None:
+                            try:
+                                _info_cache[0] = dict(ticker.info or {})
+                            except Exception:
+                                _info_cache[0] = {}
+                        return _info_cache[0]
 
                     try:
                         fi = ticker.fast_info
                         if fi is not None:
                             lp = getattr(fi, 'last_price', None)
                             pc = getattr(fi, 'previous_close', None)
-                            if lp is not None and pc is not None:
-                                last_price = float(lp)
-                                prev_close = float(pc)
+                            pre = getattr(fi, 'pre_market_price', None)
+                            post = getattr(fi, 'post_market_price', None)
+                            ovn = getattr(fi, 'overnight_price', None)
+                            regular_price = self._safe_float(lp)
+                            prev_close = self._safe_float(pc)
+                            pre_market_price = self._safe_float(pre)
+                            post_market_price = self._safe_float(post)
+                            overnight_market_price = self._safe_float(ovn)
                     except Exception:
                         pass
 
+                    if pre_market_price is None or post_market_price is None:
+                        try:
+                            info = load_info()
+                            if regular_price is None:
+                                regular_price = (
+                                    self._safe_float(info.get("regularMarketPrice"))
+                                    or self._safe_float(info.get("currentPrice"))
+                                )
+                            if prev_close is None:
+                                prev_close = (
+                                    self._safe_float(info.get("regularMarketPreviousClose"))
+                                    or self._safe_float(info.get("previousClose"))
+                                )
+                            if pre_market_price is None:
+                                pre_market_price = self._safe_float(info.get("preMarketPrice"))
+                            if post_market_price is None:
+                                post_market_price = self._safe_float(info.get("postMarketPrice"))
+                        except Exception:
+                            pass
+
+                    if overnight_market_price is None:
+                        info = load_info()
+                        for key in (
+                            "overnightMarketPrice",
+                            "overnightPrice",
+                            "overnight_market_price",
+                        ):
+                            overnight_market_price = self._safe_float(info.get(key))
+                            if overnight_market_price is not None:
+                                break
+
                     # Fallback to recent history if fast_info failed
-                    if last_price is None or prev_close is None:
+                    if regular_price is None or prev_close is None:
                         hist = ticker.history(period="5d")
                         if hist.empty:
+                            self._record_stat("upstream_failure_empty_payload")
                             return {}
-                        last_price = float(hist['Close'].iloc[-1])
-                        prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else last_price
+                        regular_price = float(hist['Close'].iloc[-1])
+                        prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else regular_price
 
-                    change = last_price - prev_close
-                    change_pct = (change / prev_close) * 100 if prev_close else 0
+                    if regular_price is None or prev_close is None:
+                        self._record_stat("upstream_failure_missing_fields")
+                        return {}
 
-                    return {
-                        "lastPrice": last_price,
-                        "priceChange": change,
-                        "priceChangePercent": change_pct
-                    }
+                    # Yahoo / yfinance usually omit overnightMarketPrice. During the overnight
+                    # window, prefer fast_info.last_price (regular_price); if it is still pinned
+                    # at previous close but postMarketPrice has moved, use post (some feeds only
+                    # refresh the post bucket for O/N).
+                    if session == "overnight" and overnight_market_price is None:
+                        if regular_price is not None:
+                            overnight_market_price = regular_price
+                        pc = prev_close
+                        if (
+                            overnight_market_price is not None
+                            and pc is not None
+                            and post_market_price is not None
+                            and abs(overnight_market_price - pc) <= 1e-4 * max(abs(pc), 1e-9)
+                            and abs(post_market_price - pc) > 1e-4 * max(abs(pc), 1e-9)
+                        ):
+                            overnight_market_price = post_market_price
+
+                    return self._quote_from_prices(
+                        session=session,
+                        regular_price=regular_price,
+                        prev_close=prev_close,
+                        pre_market_price=pre_market_price,
+                        post_market_price=post_market_price,
+                        overnight_market_price=overnight_market_price,
+                        as_of=as_of,
+                    )
+                except httpx.ReadTimeout:
+                    self._record_stat("upstream_failure_timeout")
+                    logger.error(f"yfinance Quote timeout for {symbol}")
+                    return {}
                 except Exception as e:
+                    msg = str(e).lower()
+                    if "rate limit" in msg or "429" in msg:
+                        self._record_stat("upstream_failure_rate_limit")
                     logger.error(f"yfinance Quote Error for {symbol}: {e}")
                     return {}
 
-            return await asyncio.to_thread(fetch_yfinance_quote)
+            quote = await asyncio.to_thread(fetch_yfinance_quote)
+            latency_ms = (datetime.now().timestamp() - t0) * 1000
+            self._record_latency(latency_ms)
+            if quote:
+                self._record_stat("upstream_success")
+            else:
+                self._record_stat("upstream_failure")
+            return quote
 
     async def get_quotes(self, symbols: List[str], use_cache: bool = True) -> Dict[str, Dict[str, Any]]:
         """
@@ -359,23 +698,67 @@ class StockService:
         results = {}
 
         async def fetch_and_cache(sym: str):
+            quote_key = f"stock_quote:{sym}"
+            fail_key = f"stock_quote_fail:{sym}"
+            last_good_key = f"stock_quote_lastgood:{sym}"
             if use_cache:
                 try:
-                    cached = await self.redis_client.get(f'stock_quote:{sym}')
+                    cached = await self.redis_client.get(quote_key)
                     if cached:
-                        results[sym] = json.loads(cached)
+                        self._record_stat("cache_hits")
+                        results[sym] = self._normalize_quote(json.loads(cached))
                         return
+                    self._record_stat("cache_misses")
                 except Exception as e:
                     logger.debug(f"Redis get failed (stock_quote:{sym}): {e}")
+
+            try:
+                in_fail_window = await self.redis_client.get(fail_key)
+                if in_fail_window:
+                    cached = await self.redis_client.get(quote_key)
+                    if cached:
+                        self._record_stat("fallback_cache_used")
+                        results[sym] = self._normalize_quote(json.loads(cached))
+                        return
+            except Exception:
+                pass
 
             # Fetch fresh
             quote = await self.get_quote(sym)
             if quote:
                 try:
-                    await self.redis_client.setex(f'stock_quote:{sym}', self.cache_duration, json.dumps(quote))
+                    ttl = self._stock_quote_ttl_seconds()
+                    await self.redis_client.setex(quote_key, ttl, json.dumps(quote))
+                    await self.redis_client.setex(last_good_key, 86400, json.dumps(quote))
                 except Exception as e:
                     logger.debug(f"Redis setex failed (stock_quote:{sym}): {e}")
                 results[sym] = quote
+                return
+
+            # mark short failure window to avoid retry storms
+            try:
+                await self.redis_client.setex(fail_key, self.stock_quote_failure_ttl, "1")
+            except Exception:
+                pass
+
+            # fallback priority: cache -> last good
+            try:
+                cached = await self.redis_client.get(quote_key)
+                if cached:
+                    self._record_stat("fallback_cache_used")
+                    results[sym] = self._normalize_quote(json.loads(cached))
+                    return
+            except Exception:
+                pass
+            try:
+                last_good = await self.redis_client.get(last_good_key)
+                if last_good:
+                    q = json.loads(last_good)
+                    q["isStale"] = True
+                    self._record_stat("fallback_lastgood_used")
+                    results[sym] = self._normalize_quote(q)
+            except Exception:
+                pass
 
         # Wait for all quote fetches to resolve via asyncio gather
         await asyncio.gather(*(fetch_and_cache(s) for s in symbols))
@@ -392,6 +775,25 @@ class StockService:
                     logger.debug(f"Redis fallback after force refresh failed for stock {sym}: {e}")
 
         return results
+
+    def get_metrics_snapshot(self) -> Dict[str, Any]:
+        cache_hits = int(self._stats.get("cache_hits", 0))
+        cache_misses = int(self._stats.get("cache_misses", 0))
+        total_cache_reads = cache_hits + cache_misses
+        cache_hit_rate = (cache_hits / total_cache_reads) if total_cache_reads else 0.0
+        pre_total = int(self._stats.get("pre_market_coverage_total", 0))
+        pre_available = int(self._stats.get("pre_market_coverage_available", 0))
+        post_total = int(self._stats.get("post_market_coverage_total", 0))
+        post_available = int(self._stats.get("post_market_coverage_available", 0))
+        return {
+            **self._stats,
+            "cache_hit_rate": cache_hit_rate,
+            "pre_market_coverage_rate": (pre_available / pre_total) if pre_total else 0.0,
+            "post_market_coverage_rate": (post_available / post_total) if post_total else 0.0,
+            "regular_only_mode_enabled": self._regular_only_mode_enabled(),
+            "quote_ttl_active_s": self.stock_quote_ttl_active,
+            "quote_ttl_closed_s": self.stock_quote_ttl_closed,
+        }
 
     async def search_symbols(self, query: str) -> List[Dict[str, str]]:
         """

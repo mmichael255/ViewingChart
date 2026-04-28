@@ -15,11 +15,17 @@ const fetcher = (url: string) => fetch(url).then(r => {
     return r.json();
 });
 
-export function useMarketData(symbol: string, interval: string = '1d', assetType: string = 'crypto') {
+export function useMarketData(
+    symbol: string,
+    interval: string = '1d',
+    assetType: string = 'crypto',
+    includeExtended: boolean = false,
+) {
+    const includeExtendedParam = assetType === 'stock' ? false : includeExtended;
 
     // Fetch initial data
     const { data: initialData, error, isLoading, mutate } = useSWR<KlineData[]>(
-        `${API_URL}/market/klines/${symbol}?interval=${interval}&asset_type=${assetType}`,
+        `${API_URL}/market/klines/${symbol}?interval=${interval}&asset_type=${assetType}&include_extended=${includeExtendedParam}`,
         fetcher,
         {
             refreshInterval: assetType === 'stock' ? 60000 : 0, // Poll stocks only, WS handles crypto

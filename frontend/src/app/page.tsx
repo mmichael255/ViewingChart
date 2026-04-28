@@ -1,18 +1,19 @@
 "use client";
 
 import { ChartComponent } from '@/components/ChartComponent';
-import { NewsFeed } from '@/components/NewsFeed';
 import { PriceHighlight } from '@/components/Highlighting';
-import { IndicatorBar, IndicatorConfig, availableIndicators } from '@/components/IndicatorBar';
+import { IndicatorBar, IndicatorConfig } from '@/components/IndicatorBar';
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import type { CandlestickData, Time } from 'lightweight-charts';
-import type { TickerData, WatchlistItem } from '@/types/market';
+import type { TickerData } from '@/types/market';
 import { WatchlistSidebar } from '@/components/WatchlistSidebar';
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
 import type { DrawingToolType } from '@/drawing';
 import Link from 'next/link';
+import { API_URL } from '@/config';
+import { buildPrePostSegments } from '@/lib/prepost';
 
 const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
@@ -29,6 +30,24 @@ const STOCK_WATCHLIST = [
   { sym: 'AAPL', label: 'AAPL', sub: 'Apple Inc.', source: 'Yahoo Finance' },
 ];
 
+const sessionLabel: Record<string, string> = {
+  pre: 'Pre',
+  regular: 'Regular',
+  post: 'Post',
+  overnight: 'Overnight',
+  closed: 'Closed',
+};
+
+function formatEtTime(ts?: number): string {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleTimeString('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/New_York',
+  });
+}
+
 export default function Home() {
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [chartInterval, setChartInterval] = useState('1d');
@@ -37,6 +56,16 @@ export default function Home() {
   const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
   const [stockWatchlist, setStockWatchlist] = useState(STOCK_WATCHLIST);
   const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
+  // Two ticker sources for the active symbol:
+  //   - watchlistTicker:    pushed up by <WatchlistSidebar> when symbol is in its map.
+  //   - extraTickerBySymbol: one-shot REST fetches keyed by symbol, used when the
+  //                         active symbol is NOT in the watchlist (so the chart-bar
+  //                         Pre/Post still has data). Keyed (rather than reset on
+  //                         symbol change) so a back-and-forth doesn't refetch.
+  // We split watchlist vs. extra so per-tick crypto WS frames don't trigger a
+  // setState here.
+  const [watchlistTicker, setWatchlistTicker] = useState<TickerData | undefined>(undefined);
+  const [extraTickerBySymbol, setExtraTickerBySymbol] = useState<Record<string, TickerData>>({});
 
   // Drawing Tools State
   const [activeTool, setActiveTool] = useState<DrawingToolType>('crosshair');
@@ -63,7 +92,42 @@ export default function Home() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const { data, isLoading, isError, wsStatus } = useMarketData(symbol, chartInterval, assetType);
+  const { data, isLoading, wsStatus } = useMarketData(symbol, chartInterval, assetType);
+  const extraTicker = extraTickerBySymbol[symbol];
+  const selectedTicker = watchlistTicker ?? extraTicker;
+
+  const handleSelectedTickerChange = useCallback((ticker: TickerData | undefined) => {
+    setWatchlistTicker(ticker);
+  }, []);
+
+  // One-shot REST fetch for stock tickers the sidebar doesn't know about
+  // (e.g. user searched a symbol not in the watchlist). The sidebar takes over
+  // refresh once it starts polling the symbol; this just seeds the chart-bar
+  // Pre/Post in the meantime.
+  useEffect(() => {
+    if (assetType !== 'stock' || !symbol) return;
+    if (watchlistTicker) return; // sidebar has it
+    if (extraTickerBySymbol[symbol]) return; // already fetched once
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_URL}/market/tickers?stock_symbols=${encodeURIComponent(symbol)}`,
+          { signal: controller.signal },
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as Record<string, TickerData>;
+        const t = data?.[symbol];
+        if (t) setExtraTickerBySymbol((prev) => ({ ...prev, [symbol]: t }));
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+        console.debug('[page] ticker fetch failed', err);
+      }
+    })();
+    return () => {
+      controller.abort();
+    };
+  }, [assetType, symbol, watchlistTicker, extraTickerBySymbol]);
 
   /** Same last bar as the chart / kline stream (REST + WS merged in useMarketData). */
   const lastClose = useMemo(() => {
@@ -133,8 +197,16 @@ export default function Home() {
   };
 
   const CRYPTO_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
-  const STOCK_INTERVALS = ['1m', '5m', '15m', '30m', '1h'];
+  // Stock candles always render RTH only (intraday is filtered upstream;
+  // daily+ is naturally RTH from yfinance). 4h is aggregated from 1h on the
+  // backend (`stock_service._aggregate_candles`).
+  const STOCK_INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M'];
   const allIntervals = assetType === 'crypto' ? CRYPTO_INTERVALS : STOCK_INTERVALS;
+
+  const prePostSegments = useMemo(
+    () => (assetType === 'stock' ? buildPrePostSegments(selectedTicker) : []),
+    [assetType, selectedTicker],
+  );
 
   return (
     <div className="flex flex-col h-full min-h-screen bg-[#131722] text-white overflow-hidden">
@@ -194,6 +266,48 @@ export default function Home() {
                 <span className="text-sm font-bold text-white tracking-tight">{symbol}</span>
                 {lastClose != null && (
                   <PriceHighlight price={lastClose} className="text-sm font-bold tabular-nums" />
+                )}
+                {prePostSegments.length > 0 && (
+                  <span className="text-[10px] tabular-nums flex items-center gap-2 shrink-0">
+                    {prePostSegments.map((seg) => (
+                      <span
+                        key={seg.kind}
+                        className={
+                          seg.isActiveSession
+                            ? 'text-blue-300 font-semibold'
+                            : 'text-gray-400'
+                        }
+                      >
+                        {seg.label} {seg.price.toFixed(2)}
+                      </span>
+                    ))}
+                  </span>
+                )}
+                {/* Show session badge only when it is NOT already implied by the
+                    Pre / Post / O/N highlight above. Always show during regular/closed. */}
+                {assetType === 'stock' && selectedTicker?.session && (
+                  selectedTicker.session === 'regular' || selectedTicker.session === 'closed' ||
+                  !prePostSegments.some((s) => s.isActiveSession)
+                ) && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-300 bg-blue-500/10 px-1.5 py-0.5 rounded">
+                    {sessionLabel[selectedTicker.session] ?? selectedTicker.session}
+                    {selectedTicker.asOf ? ` ${formatEtTime(selectedTicker.asOf)} ET` : ''}
+                  </span>
+                )}
+                {/* When the active session IS pre/post/overnight, replace the verbose
+                    badge with a compact ET-time chip — the colored extended-hours
+                    line above already conveys which session we're in. */}
+                {assetType === 'stock' && selectedTicker?.asOf &&
+                  (selectedTicker.session === 'pre' || selectedTicker.session === 'post' || selectedTicker.session === 'overnight') &&
+                  prePostSegments.some((s) => s.isActiveSession) && (
+                  <span className="text-[10px] text-gray-500 tabular-nums">
+                    {formatEtTime(selectedTicker.asOf)} ET
+                  </span>
+                )}
+                {selectedTicker?.isStale && (
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-yellow-300 bg-yellow-500/10 px-1.5 py-0.5 rounded">
+                    Stale
+                  </span>
                 )}
                 {wsStatus !== 'connected' && (
                   <span
@@ -316,6 +430,7 @@ export default function Home() {
           symbol={symbol}
           handleSymbolChange={handleSymbolChange}
           setSearchModalMode={setSearchModalMode}
+          onSelectedTickerChange={handleSelectedTickerChange}
         />
       </div>
 

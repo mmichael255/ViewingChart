@@ -143,6 +143,193 @@ def _latest_closed_open_time(interval: str) -> int:
     return (now // step) * step - step
 
 
+def _current_open_time(interval: str) -> int:
+    step = _INTERVAL_SECONDS[interval]
+    now = int(time.time())
+    return (now // step) * step
+
+
+async def _latest_open_time_from_api(symbol: str, interval: str, asset_type: str) -> int | None:
+    """
+    For stocks, wall-clock "latest closed" is not reliable due to market hours.
+    Fetch a tiny API tail and derive the latest open_time actually available.
+    """
+    try:
+        api = await fetch_klines_from_api(
+            symbol.upper(),
+            asset_type,
+            interval,
+            limit=10,
+            end_time=_current_open_time(interval),
+        )
+    except Exception as e:
+        logger.debug("latest-open-time probe failed: %s", e)
+        return None
+    _, mx = _range_of_open_times(api)
+    return mx
+
+
+def _row_differs_from_api(row: Kline, api: dict[str, Any], eps: float = 1e-12) -> bool:
+    return any(
+        abs(float(a) - float(b)) > eps
+        for a, b in (
+            (row.open_price, api["open"]),
+            (row.high_price, api["high"]),
+            (row.low_price, api["low"]),
+            (row.close_price, api["close"]),
+            (row.base_volume, api["volume"]),
+        )
+    )
+
+
+async def correct_recent_candles(
+    symbol: str,
+    interval: str,
+    asset_type: str,
+    correction_limit: int,
+    include_current_candle: bool,
+    dry_run: bool,
+) -> int:
+    symbol_u = symbol.upper()
+    if asset_type == "stock":
+        # Use latest API candle time so we don't "correct" non-trading periods.
+        end_t = await _latest_open_time_from_api(symbol_u, interval, asset_type)
+        if end_t is None:
+            end_t = _current_open_time(interval) if include_current_candle else _latest_closed_open_time(interval)
+    else:
+        end_t = _current_open_time(interval) if include_current_candle else _latest_closed_open_time(interval)
+    if correction_limit <= 0:
+        logger.info("Correction skipped: correction_limit <= 0")
+        return 0
+
+    db = SessionLocal()
+    try:
+        sid = _symbol_id(db, symbol_u, asset_type)
+        if sid is None and not dry_run:
+            upsert_symbol(db, infer_symbol_row(symbol_u, asset_type))
+            sid = _symbol_id(db, symbol_u, asset_type)
+        if not sid:
+            logger.info(
+                "Correction skipped: symbol row not found for %s @ %s",
+                symbol_u,
+                interval,
+            )
+            return 0
+
+        api = await fetch_klines_from_api(
+            symbol_u,
+            asset_type,
+            interval,
+            limit=correction_limit,
+            end_time=end_t,
+        )
+        if not api:
+            logger.info("Correction skipped: API returned no candles")
+            return 0
+
+        min_t, max_t = _range_of_open_times(api)
+        if min_t is None or max_t is None:
+            logger.info("Correction skipped: empty API range")
+            return 0
+        api_times = {int(k["time"]) for k in api}
+
+        rows = (
+            db.query(Kline)
+            .filter(
+                Kline.symbol_id == sid,
+                Kline.bar_interval == interval,
+                Kline.open_time >= min_t,
+                Kline.open_time <= max_t,
+            )
+            .all()
+        )
+        by_t = {int(r.open_time): r for r in rows}
+
+        to_save: list[dict[str, Any]] = []
+        mismatch_count = 0
+        missing_count = 0
+        for k in api:
+            t = int(k["time"])
+            if t > end_t:
+                continue
+            row = by_t.get(t)
+            if row is None:
+                missing_count += 1
+                to_save.append(k)
+                continue
+            if _row_differs_from_api(row, k):
+                mismatch_count += 1
+                to_save.append(k)
+
+        fix_min_t, fix_max_t = _range_of_open_times(to_save)
+        corrected = len(to_save) if dry_run else (save_klines(db, sid, interval, to_save) if to_save else 0)
+
+        # Stock cleanup: remove obvious non-trading placeholder candles (volume=0)
+        # that exist in DB but do not exist in the API result set.
+        if asset_type == "stock":
+            step = _INTERVAL_SECONDS.get(interval)
+            prune_end = max_t + (step * 2 if step else 0)
+            extra = (
+                db.query(Kline)
+                .filter(
+                    Kline.symbol_id == sid,
+                    Kline.bar_interval == interval,
+                    Kline.open_time >= min_t,
+                    Kline.open_time <= prune_end,
+                )
+                .all()
+            )
+            prune_ids = [
+                int(r.id)
+                for r in extra
+                if int(r.open_time) not in api_times and float(r.base_volume) <= 0
+            ]
+            if prune_ids:
+                if dry_run:
+                    logger.info(
+                        "Dry-run stock prune: would_delete=%d rows (volume=0, not in API set)",
+                        len(prune_ids),
+                    )
+                else:
+                    db.query(Kline).filter(Kline.id.in_(prune_ids)).delete(synchronize_session=False)
+                    db.commit()
+                    logger.info(
+                        "Stock prune: deleted=%d rows (volume=0, not in API set)",
+                        len(prune_ids),
+                    )
+
+        logger.info(
+            "%s correction plan: symbol=%s asset=%s interval=%s end=%s limit=%d api_checked=%d api_range=[%s -> %s] fix_needed=%d fix_range=[%s -> %s]",
+            "Dry-run" if dry_run else "Apply",
+            symbol_u,
+            asset_type,
+            interval,
+            _fmt_ts(end_t),
+            correction_limit,
+            len(api),
+            _fmt_ts(min_t),
+            _fmt_ts(max_t),
+            len(to_save),
+            _fmt_ts(fix_min_t),
+            _fmt_ts(fix_max_t),
+        )
+        logger.info(
+            "%s correction: range=[%s -> %s] fetched=%d mismatched=%d missing=%d %s=%d include_current=%s",
+            "Dry-run" if dry_run else "Apply",
+            _fmt_ts(min_t),
+            _fmt_ts(max_t),
+            len(api),
+            mismatch_count,
+            missing_count,
+            "would_upsert" if dry_run else "upserted",
+            corrected,
+            include_current_candle,
+        )
+        return corrected
+    finally:
+        db.close()
+
+
 async def seed_from_http(symbol: str, interval: str, limit: int, asset_type: str) -> int:
     symbol = symbol.upper()
     klines = await fetch_klines_from_api(symbol, asset_type, interval, limit)
@@ -173,6 +360,9 @@ async def fill_gaps(
     scan_end_time: int | None,
     fill_tail: bool,
     scan_internal: bool,
+    auto_correct: bool,
+    correction_limit: int,
+    include_current_candle: bool,
     dry_run: bool,
 ) -> int:
     symbol_u = symbol.upper()
@@ -211,7 +401,12 @@ async def fill_gaps(
 
         # 1) Tail gap: from newest DB candle -> latest closed candle.
         if fill_tail:
-            latest_closed = _latest_closed_open_time(interval)
+            if asset_type == "stock":
+                latest_closed = await _latest_open_time_from_api(symbol_u, interval, asset_type)
+                if latest_closed is None:
+                    latest_closed = _latest_closed_open_time(interval)
+            else:
+                latest_closed = _latest_closed_open_time(interval)
             if newest is None:
                 if dry_run:
                     api = await fetch_klines_from_api(symbol_u, asset_type, interval, 1000)
@@ -301,7 +496,32 @@ async def fill_gaps(
                     start_time=miss_start_t,
                     end_time=miss_end_t,
                 )
+                # Stock markets have scheduled closures (overnight/weekends/holidays).
+                # If the API returns nothing for a "gap span", skip it instead of trying
+                # to force-fill non-trading periods.
+                if asset_type == "stock" and not api:
+                    logger.info(
+                        "Skip internal gap (stock market closed): boundary=[%s -> %s] span=[%s -> %s]",
+                        _fmt_ts(left_t),
+                        _fmt_ts(right_t),
+                        _fmt_ts(miss_start_t),
+                        _fmt_ts(miss_end_t),
+                    )
+                    continue
                 to_save = [k for k in api if left_t < int(k["time"]) < right_t]
+                # Some stock providers may return candles adjacent to the window even
+                # when the in-between span is a non-trading closure. If nothing lands
+                # inside the span, treat it as a market-closed gap.
+                if asset_type == "stock" and not to_save:
+                    logger.info(
+                        "Skip internal gap (stock market closed/no in-span candles): boundary=[%s -> %s] span=[%s -> %s] fetched=%d",
+                        _fmt_ts(left_t),
+                        _fmt_ts(right_t),
+                        _fmt_ts(miss_start_t),
+                        _fmt_ts(miss_end_t),
+                        len(api),
+                    )
+                    continue
                 api_min_t, api_max_t = _range_of_open_times(api)
                 fill_min_t, fill_max_t = _range_of_open_times(to_save)
                 saved = len(to_save) if dry_run else (save_klines(db, sid, interval, to_save) if to_save else 0)
@@ -325,6 +545,18 @@ async def fill_gaps(
                 )
         elif scan_internal and not sid:
             logger.info("Dry-run internal scan skipped: symbol row does not exist in DB.")
+
+        # 3) Auto-correct: compare DB candles with API candles and fix mismatched rows.
+        if auto_correct:
+            corrected = await correct_recent_candles(
+                symbol_u,
+                interval,
+                asset_type,
+                correction_limit=correction_limit,
+                include_current_candle=include_current_candle,
+                dry_run=dry_run,
+            )
+            total_saved_or_planned += corrected
 
         logger.info(
             "Gap fill done (%s): total candles %s=%d",
@@ -405,7 +637,7 @@ async def seed_from_ws(symbol: str, interval: str, sample_size: int, asset_type:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Seed kline/candle data into DB")
-    parser.add_argument("--mode", choices=["http", "ws", "fill-gaps"], default="http")
+    parser.add_argument("--mode", choices=["http", "ws", "fill-gaps", "correct"], default="http")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--interval", default="1h")
     parser.add_argument("--asset-type", choices=["crypto", "stock"], default="crypto")
@@ -451,6 +683,22 @@ async def main() -> None:
         help="fill-gaps mode: disable internal-gap scan/fill",
     )
     parser.add_argument(
+        "--auto-correct",
+        action="store_true",
+        help="fill-gaps mode: auto-correct mismatched candles by comparing DB rows with API candles",
+    )
+    parser.add_argument(
+        "--correction-limit",
+        type=int,
+        default=1000,
+        help="fill-gaps mode: number of most recent candles to verify/correct from API",
+    )
+    parser.add_argument(
+        "--include-current-candle",
+        action="store_true",
+        help="correct/fill-gaps mode: include currently open candle for correction",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="fill-gaps mode: plan and print gaps without writing to DB",
@@ -475,6 +723,16 @@ async def main() -> None:
         if args.mode == "ws":
             await seed_from_ws(args.symbol, args.interval, args.sample_size, args.asset_type)
             return
+        if args.mode == "correct":
+            await correct_recent_candles(
+                args.symbol,
+                args.interval,
+                args.asset_type,
+                correction_limit=args.correction_limit,
+                include_current_candle=args.include_current_candle,
+                dry_run=args.dry_run,
+            )
+            return
         await fill_gaps(
             args.symbol,
             args.interval,
@@ -484,6 +742,9 @@ async def main() -> None:
             scan_end_time=scan_end_time,
             fill_tail=not args.no_tail,
             scan_internal=not args.no_internal,
+            auto_correct=args.auto_correct,
+            correction_limit=args.correction_limit,
+            include_current_candle=args.include_current_candle,
             dry_run=args.dry_run,
         )
     except OperationalError as e:
