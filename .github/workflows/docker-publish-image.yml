@@ -1,0 +1,32 @@
+name: Publish backend image
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        env:
+          IMAGE_BASE: ghcr.io/mmichael/viewingchart/backend
+        run: |
+          TAG_SHA=${{ github.sha }}
+          docker build ./backend -f ./backend/Dockerfile \
+            -t "${IMAGE_BASE}:main" \
+            -t "${IMAGE_BASE}:${TAG_SHA}"
+          docker push "${IMAGE_BASE}:main"
+          docker push "${IMAGE_BASE}:${TAG_SHA}"
