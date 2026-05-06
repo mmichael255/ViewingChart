@@ -1,15 +1,24 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PriceHighlight } from "./Highlighting";
 import type { KlineData, TickerData, WatchlistItem } from "@/types/market";
 import {
     computePerformanceRows,
-    computeSeasonalMonthlyCells,
-    type SeasonalMonthCell,
+    computeSeasonalYearCompareSeries,
+    type SeasonalYearLine,
 } from "@/lib/symbolDetailAnalytics";
 import { calculateEMA, calculateRSI } from "@/utils/indicators";
+import {
+    createChart,
+    ColorType,
+    LineSeries,
+    type IChartApi,
+    type ISeriesApi,
+    type Time,
+    type UTCTimestamp,
+} from "lightweight-charts";
 
 const sessionLabel: Record<string, string> = {
     pre: "Pre",
@@ -91,28 +100,12 @@ function formatPerfPct(pct: number | null): ReactNode {
     );
 }
 
-function PerformanceTable({ rows }: { rows: { label: string; pct: number | null }[] }) {
-    return (
-        <div className="rounded-md border border-gray-600/35 bg-black/25 overflow-hidden">
-            {rows.map((r) => (
-                <div
-                    key={r.label}
-                    className="flex justify-between items-center gap-2 px-2.5 py-2 border-b border-gray-700/40 last:border-0 text-[12px]"
-                >
-                    <span className="text-gray-300 font-semibold tabular-nums w-9 shrink-0">{r.label}</span>
-                    <span className="tabular-nums">{formatPerfPct(r.pct)}</span>
-                </div>
-            ))}
-        </div>
-    );
-}
-
-function SeasonalsGrid({ cells }: { cells: SeasonalMonthCell[] }) {
+function PerformanceGrid({ rows }: { rows: { label: string; pct: number | null }[] }) {
     return (
         <div className="grid grid-cols-4 gap-1.5">
-            {cells.map((c) => {
-                const v = c.avgPct;
-                const has = v != null && Number.isFinite(v) && c.sampleYears > 0;
+            {rows.map((r) => {
+                const v = r.pct;
+                const has = v != null && Number.isFinite(v);
                 const up = has && (v as number) >= 0;
                 const bg = !has
                     ? "bg-gray-800/40 border-gray-700/50"
@@ -121,11 +114,11 @@ function SeasonalsGrid({ cells }: { cells: SeasonalMonthCell[] }) {
                       : "bg-rose-950/70 border-rose-700/40";
                 return (
                     <div
-                        key={c.label}
+                        key={r.label}
                         className={`rounded border px-1 py-1.5 text-center ${bg}`}
-                        title={has ? `Avg. ${(v as number).toFixed(2)}% · ${c.sampleYears} month(s) in data` : "No data"}
+                        title={has ? `${(v as number).toFixed(2)}%` : "No data"}
                     >
-                        <div className="text-[9px] font-black text-gray-400 uppercase tracking-tight">{c.label}</div>
+                        <div className="text-[9px] font-black text-gray-400 uppercase tracking-tight">{r.label}</div>
                         <div
                             className={`text-[11px] font-bold tabular-nums mt-0.5 ${
                                 !has ? "text-gray-500" : up ? "text-emerald-300" : "text-rose-300"
@@ -136,6 +129,272 @@ function SeasonalsGrid({ cells }: { cells: SeasonalMonthCell[] }) {
                     </div>
                 );
             })}
+        </div>
+    );
+}
+
+const SEASONAL_MONTHS = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+] as const;
+
+function SeasonalsYearCompareChart({ lines }: { lines: SeasonalYearLine[] }) {
+    const containerRef = useRef<HTMLDivElement>(null);
+    const chartRef = useRef<IChartApi | null>(null);
+    const seriesRefs = useRef<Map<number, ISeriesApi<"Line">>>(new Map());
+    const baselineRef = useRef<ISeriesApi<"Line"> | null>(null);
+
+    const [hover, setHover] = useState<
+        | { x: number; monthLabel: string; day: number; vals: Record<number, number | null> }
+        | null
+    >(null);
+
+    useEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+
+        const chart = createChart(el, {
+            layout: {
+                background: { type: ColorType.Solid, color: "rgba(0,0,0,0)" },
+                textColor: "#a3a3a3",
+                fontSize: 11,
+            },
+            autoSize: true,
+            grid: {
+                vertLines: { color: "rgba(148,163,184,0.18)", style: 2 },
+                horzLines: { color: "rgba(148,163,184,0.10)", style: 0 },
+            },
+            rightPriceScale: {
+                borderVisible: false,
+                scaleMargins: { top: 0.18, bottom: 0.12 },
+            },
+            timeScale: {
+                borderVisible: false,
+                timeVisible: false,
+                visible: false,
+                tickMarkFormatter: () => "",
+            },
+            crosshair: {
+                vertLine: {
+                    color: "rgba(255,255,255,0.35)",
+                    width: 1,
+                    style: 2,
+                    visible: true,
+                    labelVisible: false,
+                },
+                horzLine: { visible: false, labelVisible: false },
+            },
+            handleScroll: false,
+            handleScale: false,
+        });
+
+        chartRef.current = chart;
+
+        return () => {
+            chart.remove();
+            chartRef.current = null;
+            seriesRefs.current.clear();
+            baselineRef.current = null;
+        };
+    }, []);
+
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart) return;
+
+        for (const [, s] of seriesRefs.current) {
+            try {
+                chart.removeSeries(s);
+            } catch {
+                // ignore
+            }
+        }
+        seriesRefs.current.clear();
+
+        if (baselineRef.current) {
+            try {
+                chart.removeSeries(baselineRef.current);
+            } catch {
+                // ignore
+            }
+            baselineRef.current = null;
+        }
+
+        if (!lines.length) return;
+
+        const BASE_YEAR_START = Math.floor(Date.UTC(2000, 0, 1) / 1000) as UTCTimestamp;
+        const BASE_YEAR_END = Math.floor(Date.UTC(2000, 11, 31) / 1000) as UTCTimestamp;
+
+        // 0% reference line spanning the full base-year calendar.
+        const baseline = chart.addSeries(LineSeries, {
+            color: "rgba(255,255,255,0.45)",
+            lineWidth: 1,
+            lineStyle: 0,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceLineVisible: false,
+        });
+        baseline.setData([
+            { time: BASE_YEAR_START, value: 0 },
+            { time: BASE_YEAR_END, value: 0 },
+        ]);
+        baselineRef.current = baseline;
+
+        // Add lines oldest -> newest so the newest (current year) renders on top.
+        const ascending = [...lines].sort((a, b) => a.year - b.year);
+        for (const ln of ascending) {
+            const s = chart.addSeries(LineSeries, {
+                color: ln.color,
+                lineWidth: 2,
+                crosshairMarkerVisible: true,
+                crosshairMarkerRadius: 3,
+                crosshairMarkerBorderColor: ln.color,
+                crosshairMarkerBackgroundColor: ln.color,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            });
+            const seriesData = ln.data.map((p) => ({
+                time: p.time as UTCTimestamp,
+                value: p.value,
+            }));
+            s.setData(seriesData);
+            seriesRefs.current.set(ln.year, s);
+        }
+
+        chart.timeScale().setVisibleRange({ from: BASE_YEAR_START as Time, to: BASE_YEAR_END as Time });
+    }, [lines]);
+
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart) return;
+
+        const handler = (param: Parameters<Parameters<IChartApi["subscribeCrosshairMove"]>[0]>[0]) => {
+            if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
+                setHover(null);
+                return;
+            }
+            const ts = typeof param.time === "number" ? param.time : Number(param.time);
+            const d = Number.isFinite(ts) ? new Date(ts * 1000) : null;
+            const month = d ? d.getUTCMonth() + 1 : 1;
+            const day = d ? d.getUTCDate() : 1;
+            const monthLabel = SEASONAL_MONTHS[Math.max(0, Math.min(11, month - 1))];
+
+            const vals: Record<number, number | null> = {};
+            for (const ln of lines) {
+                const s = seriesRefs.current.get(ln.year);
+                if (!s) {
+                    vals[ln.year] = null;
+                    continue;
+                }
+                const v = param.seriesData.get(s) as { value?: number } | number | undefined;
+                const num =
+                    typeof v === "number"
+                        ? v
+                        : typeof v === "object" && v && typeof v.value === "number"
+                          ? v.value
+                          : null;
+                vals[ln.year] = num != null && Number.isFinite(num) ? num : null;
+            }
+
+            const cw = containerRef.current?.clientWidth ?? 0;
+            const pad = 36;
+            const rawX = param.point.x;
+            const x = cw > 0 ? Math.min(Math.max(rawX, pad), cw - pad) : rawX;
+            setHover({ x, monthLabel, day, vals });
+        };
+
+        chart.subscribeCrosshairMove(handler);
+        return () => {
+            chart.unsubscribeCrosshairMove(handler);
+        };
+    }, [lines]);
+
+    const hasLines = lines.length > 0;
+
+    return (
+        <div className="relative">
+            {/*
+              Chart + crosshair hover card (TradingView-style): compare block rides on the vertical line.
+            */}
+            <div className="relative" style={{ width: "100%", height: 200 }}>
+                <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+                {!hasLines && (
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <p className="text-[12px] text-gray-400">No candle data.</p>
+                    </div>
+                )}
+                {hasLines && hover ? (
+                    <div
+                        className="pointer-events-none absolute top-0 z-10 flex flex-col items-center "
+                        style={{ left: hover.x, transform: "translate(-50%, -50px)" }}
+                    >
+                        <div className="min-w-[120px] rounded-md border border-gray-600/60 bg-[#1a1f2e]/95 px-2 py-1.5 shadow-lg shadow-black/40 backdrop-blur-sm">
+                            <div className="mb-1 border-b border-gray-600/40 pb-1 text-center text-[9px] font-semibold tabular-nums text-gray-400">
+                                {hover.monthLabel} {hover.day}
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                {lines.map((ln) => {
+                                    const v = hover.vals[ln.year] ?? null;
+                                    const up = v != null && Number.isFinite(v) && v >= 0;
+                                    return (
+                                        <div
+                                            key={ln.year}
+                                            className="flex items-center gap-2 text-[10px] tabular-nums leading-tight"
+                                        >
+                                            <span
+                                                className="h-2 w-2 shrink-0 rounded-full border border-gray-900/60 ring-1 ring-black/30"
+                                                style={{ backgroundColor: ln.color }}
+                                            />
+                                            <span className="w-[34px] shrink-0 font-semibold text-gray-200">
+                                                {ln.year}
+                                            </span>
+                                            <span
+                                                className={
+                                                    v == null
+                                                        ? "text-gray-500"
+                                                        : up
+                                                          ? "font-bold text-emerald-400"
+                                                          : "font-bold text-rose-400"
+                                                }
+                                            >
+                                                {v == null ? "—" : `${up ? "+" : ""}${v.toFixed(2)}%`}
+                                            </span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                        <div
+                            className="h-0 w-0 border-x-[5px] border-t-[6px] border-x-transparent border-t-gray-600/70"
+                            aria-hidden
+                        />
+                    </div>
+                ) : null}
+            </div>
+
+            {hasLines ? (
+                <div className="mt-1.5 flex justify-center gap-4 text-[11px] text-gray-400">
+                    {lines.map((ln) => (
+                            <div key={ln.year} className="flex shrink-0 items-center gap-2 tabular-nums">
+                                <span
+                                    className="inline-block h-2.5 w-2.5 rounded-full"
+                                    style={{ backgroundColor: ln.color }}
+                                />
+                                <span>{ln.year}</span>
+                            </div>
+                        ))}
+                </div>
+            ) : null}
         </div>
     );
 }
@@ -192,19 +451,27 @@ export function SymbolDetailPanel({
 
     const technical = useMemo(() => {
         if (!klines?.length || klines.length < 30) {
-            return { rsi: null as number | null, emaFast: null as number | null, emaSlow: null as number | null };
+            return {
+                rsi: null as number | null,
+                emaFast: null as number | null,
+                emaSlow: null as number | null,
+                ema99: null as number | null,
+            };
         }
         const rsiSeries = calculateRSI(klines, 14);
         const ema7 = calculateEMA(klines, 7);
         const ema25 = calculateEMA(klines, 25);
+        const ema99 = calculateEMA(klines, 99);
         const lastRsi = rsiSeries[rsiSeries.length - 1]?.value;
         const rsi = typeof lastRsi === "number" && Number.isFinite(lastRsi) ? lastRsi : null;
         const ef = ema7[ema7.length - 1]?.value;
         const es = ema25[ema25.length - 1]?.value;
+        const e99 = ema99[ema99.length - 1]?.value;
         return {
             rsi,
             emaFast: typeof ef === "number" && Number.isFinite(ef) ? ef : null,
             emaSlow: typeof es === "number" && Number.isFinite(es) ? es : null,
+            ema99: typeof e99 === "number" && Number.isFinite(e99) ? e99 : null,
         };
     }, [klines]);
 
@@ -212,7 +479,7 @@ export function SymbolDetailPanel({
 
     const performanceRows = useMemo(() => computePerformanceRows(klines ?? []), [klines]);
 
-    const seasonalCells = useMemo(() => computeSeasonalMonthlyCells(klines ?? []), [klines]);
+    const seasonalLines = useMemo(() => computeSeasonalYearCompareSeries(klines ?? [], 3), [klines]);
     const sourceBadge = watchlistMeta?.source ?? (isStock ? "Stock/FX" : "Crypto");
     const showLoading = klinesLoading && (!klines || klines.length === 0);
 
@@ -352,7 +619,7 @@ export function SymbolDetailPanel({
                     {!klines?.length ? (
                         <p className="text-[12px] text-gray-400 leading-relaxed px-0.5">No candle data.</p>
                     ) : (
-                        <PerformanceTable rows={performanceRows} />
+                        <PerformanceGrid rows={performanceRows} />
                     )}
                 </Card>
 
@@ -422,6 +689,7 @@ export function SymbolDetailPanel({
                             <>
                                 <StatRow label="EMA(7)" value={formatNumber(technical.emaFast)} />
                                 <StatRow label="EMA(25)" value={formatNumber(technical.emaSlow)} />
+                                {technical.ema99 != null && <StatRow label="EMA(99)" value={formatNumber(technical.ema99)} />}
                             </>
                         )}
                     </div>
@@ -430,14 +698,9 @@ export function SymbolDetailPanel({
                 {/* Seasonals — avg monthly % by calendar month across loaded history */}
                 <Card title="Seasonals">
                     <p className="text-[10px] text-gray-400 mb-2.5 leading-snug">
-                        Average monthly % (first open → last close of each calendar month). More history
-                        yields a closer read to classic seasonality charts.
+                        TradingView-style: compare cumulative % return by calendar day for the most recent 3 years.
                     </p>
-                    {!klines?.length ? (
-                        <p className="text-[12px] text-gray-400 leading-relaxed px-0.5">No candle data.</p>
-                    ) : (
-                        <SeasonalsGrid cells={seasonalCells} />
-                    )}
+                    <SeasonalsYearCompareChart lines={seasonalLines} />
                 </Card>
             </div>
         </div>
