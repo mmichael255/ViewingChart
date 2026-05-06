@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
 
+from app.services.stock_service import stock_service
 from app.services.websocket_manager import manager
 
 router = APIRouter(tags=["metrics"])
@@ -59,6 +60,34 @@ _g_kline_room_count = Gauge(
     "viewingchart_kline_room_count",
     "Distinct symbol_interval kline rooms with at least one client",
 )
+_g_stock_quote_cache_hit_rate = Gauge(
+    "viewingchart_stock_quote_cache_hit_rate",
+    "Stock quote cache hit rate",
+)
+_g_stock_quote_upstream_failure_rate = Gauge(
+    "viewingchart_stock_quote_upstream_failure_rate",
+    "Stock quote upstream failure rate",
+)
+_g_stock_quote_upstream_latency_avg_ms = Gauge(
+    "viewingchart_stock_quote_upstream_latency_avg_ms",
+    "Stock quote upstream average latency in milliseconds",
+)
+_g_stock_quote_upstream_latency_p95_ms = Gauge(
+    "viewingchart_stock_quote_upstream_latency_p95_ms",
+    "Stock quote upstream P95 latency in milliseconds",
+)
+_g_stock_quote_pre_coverage_rate = Gauge(
+    "viewingchart_stock_quote_pre_coverage_rate",
+    "Share of stock quotes that include pre-market price",
+)
+_g_stock_quote_post_coverage_rate = Gauge(
+    "viewingchart_stock_quote_post_coverage_rate",
+    "Share of stock quotes that include post-market price",
+)
+_g_stock_regular_only_mode_enabled = Gauge(
+    "viewingchart_stock_regular_only_mode_enabled",
+    "1 if regular-only display mode is enabled",
+)
 
 
 @router.get("/metrics")
@@ -88,6 +117,20 @@ async def prometheus_metrics():
     _g_ticker_streams_spot.set(float(tc.get("spot", 0)))
     _g_ticker_streams_futures.set(float(tc.get("futures", 0)))
     _g_kline_room_count.set(float(s.get("kline_room_count", 0)))
+
+    stock_stats = stock_service.get_metrics_snapshot()
+    succ = float(stock_stats.get("upstream_success", 0))
+    fail = float(stock_stats.get("upstream_failure", 0))
+    req = succ + fail
+    latency_samples = float(stock_stats.get("upstream_latency_samples", 0))
+    latency_total = float(stock_stats.get("upstream_latency_ms_total", 0))
+    _g_stock_quote_cache_hit_rate.set(float(stock_stats.get("cache_hit_rate", 0.0)))
+    _g_stock_quote_upstream_failure_rate.set((fail / req) if req else 0.0)
+    _g_stock_quote_upstream_latency_avg_ms.set((latency_total / latency_samples) if latency_samples else 0.0)
+    _g_stock_quote_upstream_latency_p95_ms.set(float(stock_stats.get("upstream_latency_p95_ms", 0.0)))
+    _g_stock_quote_pre_coverage_rate.set(float(stock_stats.get("pre_market_coverage_rate", 0.0)))
+    _g_stock_quote_post_coverage_rate.set(float(stock_stats.get("post_market_coverage_rate", 0.0)))
+    _g_stock_regular_only_mode_enabled.set(1.0 if stock_stats.get("regular_only_mode_enabled") else 0.0)
 
     data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)

@@ -16,10 +16,19 @@ export interface TickerData {
     lastPrice: number;
     priceChange: number;
     priceChangePercent: number;
+    session?: "pre" | "regular" | "post" | "overnight" | "closed";
+    preMarketPrice?: number | null;
+    postMarketPrice?: number | null;
+    overnightMarketPrice?: number | null;
+    previousClose?: number;
+    baselinePrice?: number;
+    asOf?: number;
+    isStale?: boolean;
 }
 
 export interface WatchlistItem {
     sym: string;
     label: string;
     sub: string;
+    source?: string;
 }

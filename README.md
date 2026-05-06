@@ -143,6 +143,9 @@ Optional switches for fill mode:
 - `--no-tail`: skip tail-gap filling (only internal scan)
 - `--no-internal`: skip internal scan (only tail-gap filling)
 - `--dry-run`: print gap-fill plan (would-save counts) without writing to DB
+- `--auto-correct`: compare recent DB candles with API candles and upsert mismatches/missing rows
+- `--correction-limit 1000`: number of most recent candles to verify for correction
+- `--include-current-candle`: include the current open candle in correction checks
 
 Dry run examples:
 
@@ -155,6 +158,31 @@ cd backend
 cd backend
 ./.venv/bin/python seed_candles.py --mode fill-gaps --symbol BTCUSDT --interval 1h --asset-type crypto --scan-start-time 20260413000000 --scan-end-time 20260420000000 --dry-run
 ```
+
+Auto-correct tutorial (fix wrong candles):
+
+1. Run correction-only mode for recent closed candles:
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode correct --symbol BTCUSDT --interval 1m --asset-type crypto --correction-limit 1000
+```
+
+2. Include current/open candle if you also want to fix the live bar:
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode correct --symbol BTCUSDT --interval 1m --asset-type crypto --correction-limit 1000 --include-current-candle
+```
+
+3. Preview first (no DB writes):
+
+```bash
+cd backend
+./.venv/bin/python seed_candles.py --mode correct --symbol BTCUSDT --interval 1m --asset-type crypto --correction-limit 1000 --include-current-candle --dry-run
+```
+
+You can also keep using `--mode fill-gaps` and add `--auto-correct` to run gap filling plus correction in one command.
 
 ## Basic Health Checks
 

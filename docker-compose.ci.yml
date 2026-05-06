@@ -1,0 +1,28 @@
+# 仅在 CI 使用：docker compose -f docker-compose.yml -f docker-compose.ci.yml ...
+services:
+  mariadb:
+    image: mariadb:11
+    environment:
+      MYSQL_ROOT_PASSWORD: ci_viewingchart_root
+      MYSQL_DATABASE: viewingchart
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

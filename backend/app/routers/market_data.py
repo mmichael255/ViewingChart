@@ -170,14 +170,25 @@ async def get_klines(
     symbol: str,
     interval: str = Query(default="1d", description="Candle interval"),
     asset_type: str = Query(default="crypto", description="Asset type: crypto or stock"),
+    include_extended: bool = Query(
+        default=False,
+        description="Include pre/post market candles when supported by upstream",
+    ),
 ):
     """Get historical k-lines for a symbol."""
     symbol = validate_symbol(symbol)
     interval = validate_interval(interval)
     asset_type = validate_asset_type(asset_type)
 
+    if asset_type == "stock":
+        include_extended = False
+
     data = await get_klines_db_first(
-        symbol, bar_interval=interval, asset_type=asset_type, limit=5000
+        symbol,
+        bar_interval=interval,
+        asset_type=asset_type,
+        limit=5000,
+        include_extended=include_extended,
     )
 
     if not data:

@@ -75,6 +75,7 @@ export default function MonitorPage() {
   const spotOk = health?.checks?.binance_spot_ws === "ok";
   const futOk = health?.checks?.binance_futures_ws === "ok";
   const channels = (wsStatus?.redis_pubsub_channels as string[] | undefined) ?? [];
+  const stockMetrics = (wsStatus?.stock_quote_metrics as Record<string, unknown> | undefined) ?? {};
 
   return (
     <div className="min-h-screen bg-[#131722] text-gray-100 p-6 overflow-y-auto">
@@ -139,6 +140,57 @@ export default function MonitorPage() {
                 {typeof wsStatus?.futures_reconnect_count === "number"
                   ? wsStatus.futures_reconnect_count
                   : "—"}
+              </dd>
+            </div>
+          </dl>
+        </section>
+
+        <section className="rounded-lg border border-gray-800 bg-[#1E222D] p-4 space-y-3">
+          <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
+            Stock quote quality
+          </h2>
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+            <div className="flex justify-between gap-2 border-b border-gray-800/80 pb-2">
+              <dt className="text-gray-500">Cache hit rate</dt>
+              <dd className="font-mono tabular-nums">
+                {typeof stockMetrics.cache_hit_rate === "number"
+                  ? `${(Number(stockMetrics.cache_hit_rate) * 100).toFixed(1)}%`
+                  : "—"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2 border-b border-gray-800/80 pb-2">
+              <dt className="text-gray-500">Upstream failure rate</dt>
+              <dd className="font-mono tabular-nums">
+                {(() => {
+                  const succ = Number(stockMetrics.upstream_success ?? 0);
+                  const fail = Number(stockMetrics.upstream_failure ?? 0);
+                  const total = succ + fail;
+                  return total > 0 ? `${((fail / total) * 100).toFixed(1)}%` : "—";
+                })()}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-gray-500">Latency avg / P95 (ms)</dt>
+              <dd className="font-mono tabular-nums">
+                {typeof stockMetrics.upstream_latency_samples === "number" &&
+                Number(stockMetrics.upstream_latency_samples) > 0
+                  ? `${(Number(stockMetrics.upstream_latency_ms_total ?? 0) / Number(stockMetrics.upstream_latency_samples)).toFixed(0)} / ${Number(stockMetrics.upstream_latency_p95_ms ?? 0).toFixed(0)}`
+                  : "—"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-gray-500">Pre/Post coverage</dt>
+              <dd className="font-mono tabular-nums">
+                {typeof stockMetrics.pre_market_coverage_rate === "number" &&
+                typeof stockMetrics.post_market_coverage_rate === "number"
+                  ? `${(Number(stockMetrics.pre_market_coverage_rate) * 100).toFixed(1)}% / ${(Number(stockMetrics.post_market_coverage_rate) * 100).toFixed(1)}%`
+                  : "—"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2">
+              <dt className="text-gray-500">Regular-only mode</dt>
+              <dd className="font-mono tabular-nums">
+                {wsStatus?.stock_regular_only_mode ? "ON" : "OFF"}
               </dd>
             </div>
           </dl>

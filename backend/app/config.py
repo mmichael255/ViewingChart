@@ -23,6 +23,11 @@ class Settings:
         if o.strip()
     ]
     RATE_LIMIT = os.getenv("RATE_LIMIT", "60/minute")
+    # Stock quote cache TTL (seconds). Active TTL on US weekdays; closed on weekends.
+    STOCK_QUOTE_TTL_ACTIVE = int(os.getenv("STOCK_QUOTE_TTL_ACTIVE", "10"))
+    STOCK_QUOTE_TTL_CLOSED = int(os.getenv("STOCK_QUOTE_TTL_CLOSED", "60"))
+    STOCK_QUOTE_FAILURE_TTL = int(os.getenv("STOCK_QUOTE_FAILURE_TTL", "10"))
+    STOCK_REGULAR_ONLY_MODE = os.getenv("STOCK_REGULAR_ONLY_MODE", "false").lower() in {"1", "true", "yes", "on"}
 
     # ── Redis ──
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
