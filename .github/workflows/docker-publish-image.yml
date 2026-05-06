@@ -22,7 +22,7 @@ jobs:
 
       - name: Build and push
         env:
-          IMAGE_BASE: ghcr.io/mmichael/viewingchart/backend
+          IMAGE_BASE: ghcr.io/mmichael255/viewingchart/backend
         run: |
           TAG_SHA=${{ github.sha }}
           docker build ./backend -f ./backend/Dockerfile \
