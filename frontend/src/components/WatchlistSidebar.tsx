@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { PriceHighlight } from './Highlighting';
-import { NewsFeed } from './NewsFeed';
+import { SymbolDetailPanel } from './SymbolDetailPanel';
 import { API_URL, websocketApiBase } from '@/config';
-import type { TickerData, WatchlistItem } from '@/types/market';
+import type { KlineData, TickerData, WatchlistItem } from '@/types/market';
 import type { WsStatus } from '@/hooks/useMarketData';
 import {
     MARKET_STALE_QUOTES_MS,
@@ -17,6 +17,13 @@ interface WatchlistSidebarProps {
     cryptoWatchlist: WatchlistItem[];
     stockWatchlist: WatchlistItem[];
     symbol: string;
+    assetType: string;
+    chartInterval: string;
+    /** Chart klines at current interval (same as main chart) */
+    chartKlines?: KlineData[];
+    chartKlinesLoading?: boolean;
+    /** Merged ticker for active symbol (watchlist WS/poll + parent extra fetch) */
+    mergedTicker?: TickerData;
     handleSymbolChange: (newSymbol: string, type: string) => void;
     setSearchModalMode: (mode: 'closed' | 'search' | 'add') => void;
     /**
@@ -31,6 +38,11 @@ export function WatchlistSidebar({
     cryptoWatchlist,
     stockWatchlist,
     symbol,
+    assetType,
+    chartInterval,
+    chartKlines,
+    chartKlinesLoading,
+    mergedTicker,
     handleSymbolChange,
     setSearchModalMode,
     onSelectedTickerChange,
@@ -295,6 +307,11 @@ export function WatchlistSidebar({
         }
     }, [cryptoWatchlist]);
 
+    const watchlistMeta = useMemo(() => {
+        const all = [...cryptoWatchlist, ...stockWatchlist];
+        return all.find((i) => i.sym === symbol) ?? null;
+    }, [symbol, cryptoWatchlist, stockWatchlist]);
+
     return (
         <aside className="w-[320px] shrink-0 flex flex-col border border-gray-800 bg-[#1E222D] overflow-hidden z-20 shadow-xl">
             <div className="flex flex-col h-full overflow-hidden">
@@ -336,8 +353,16 @@ export function WatchlistSidebar({
                         />
                     </div>
                 </div>
-                <div className="flex-1 flex flex-col bg-[#1E222D] overflow-hidden">
-                    <NewsFeed compact />
+                <div className="flex-1 flex flex-col bg-[#1E222D] overflow-hidden min-h-0">
+                    <SymbolDetailPanel
+                        symbol={symbol}
+                        assetType={assetType}
+                        chartInterval={chartInterval}
+                        ticker={mergedTicker}
+                        klines={chartKlines}
+                        klinesLoading={chartKlinesLoading}
+                        watchlistMeta={watchlistMeta}
+                    />
                 </div>
             </div>
         </aside>

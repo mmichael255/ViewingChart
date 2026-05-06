@@ -428,6 +428,11 @@ export default function Home() {
           cryptoWatchlist={cryptoWatchlist}
           stockWatchlist={stockWatchlist}
           symbol={symbol}
+          assetType={assetType}
+          chartInterval={chartInterval}
+          chartKlines={data}
+          chartKlinesLoading={isLoading}
+          mergedTicker={selectedTicker}
           handleSymbolChange={handleSymbolChange}
           setSearchModalMode={setSearchModalMode}
           onSelectedTickerChange={handleSelectedTickerChange}
