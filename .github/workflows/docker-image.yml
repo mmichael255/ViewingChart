@@ -1,0 +1,50 @@
+name: Compose CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1) 准备环境变量（关键：DB_HOST=mariadb、REDIS_HOST=redis）
+      - name: Prepare .env for CI
+        run: |
+          cp .env.ci .env
+
+      # 2) 先把前端静态导出出来（因为 nginx 挂载 ./frontend/out）
+      - name: Build frontend static export
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # 3) 用两份 compose 叠加启动（ci.yml 负责补 mariadb+redis）
+      - name: Compose up
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build
+
+      # 4) 等待服务就绪（通过 nginx 访问后端 health）
+      - name: Wait for API
+        run: |
+          set -e
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:8080/api/v1/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
+          exit 1
+
+      # 5) 清理资源（不管成功失败都执行）
+      - name: Compose down
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v --remove-orphans
