@@ -1,0 +1,45 @@
+name: Publish backend image
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        env:
+          IMAGE_BASE: ghcr.io/mmichael255/viewingchart/backend
+          IMAGE_WEB: ghcr.io/${{ github.repository_owner }}/viewingchart/web
+        run: |
+          set -euo pipefail
+          TAG_SHA=${{ github.sha }}
+
+          #backend
+          docker build ./backend -f ./backend/Dockerfile \
+            -t "${IMAGE_BASE}:main" \
+            -t "${IMAGE_BASE}:${TAG_SHA}"
+          docker push "${IMAGE_BASE}:main"
+          docker push "${IMAGE_BASE}:${TAG_SHA}"
+
+          # web (Dockerfile.web at repo root)
+          docker build . -f ./Dockerfile.web \
+            --build-arg NEXT_PUBLIC_API_URL=/api/v1 \
+            --build-arg NEXT_PUBLIC_WS_URL= \
+            -t "${IMAGE_WEB}:main" \
+            -t "${IMAGE_WEB}:${TAG_SHA}"
+          docker push "${IMAGE_WEB}:main"
+          docker push "${IMAGE_WEB}:${TAG_SHA}"
