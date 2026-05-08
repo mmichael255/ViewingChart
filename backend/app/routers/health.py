@@ -1,9 +1,10 @@
 import time
 import logging
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.config import get_redis, settings
 from app.services.stock_service import stock_service
 from app.services.websocket_manager import manager
+from app.auth.deps import require_superadmin
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +14,7 @@ _start_time = time.time()
 
 
 @router.get("/health")
-async def health_check():
+async def health_check(_=Depends(require_superadmin)):
     """
     Health check endpoint — verifies critical dependencies.
     Returns 200 if healthy, 503 if any critical dependency is down.
@@ -47,7 +48,7 @@ async def health_check():
 
 
 @router.get("/ws/status")
-async def ws_status():
+async def ws_status(_=Depends(require_superadmin)):
     """Real-time WebSocket metrics: connection state, reconnect counts, message rates, client counts."""
     status = manager.get_status()
     status["uptime_seconds"] = round(time.time() - _start_time, 1)

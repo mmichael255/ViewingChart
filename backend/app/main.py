@@ -94,18 +94,27 @@ async def request_logger(request: Request, call_next):
 
 # ── Import & register routers ──
 from app.routers import market_data, chat, news
+from app.routers import auth as auth_router
+from app.routers import me as me_router
+from app.routers import watchlists as watchlists_router
 from app.routers import health as health_router
 from app.routers import metrics_prometheus
 from app.database.connection import engine
 from app.database import models
 
-# Create tables
-models.Base.metadata.create_all(bind=engine)
+# Schema management:
+# - In production, prefer Alembic migrations.
+# - For local dev convenience, allow create_all when explicitly enabled.
+if settings.ENVIRONMENT != "production" or __import__("os").getenv("DB_CREATE_ALL", "").lower() in {"1", "true", "yes", "on"}:
+    models.Base.metadata.create_all(bind=engine)
 
 # API v1 — versioned routes
 app.include_router(market_data.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(news.router, prefix="/api/v1")
+app.include_router(auth_router.router, prefix="/api/v1")
+app.include_router(me_router.router, prefix="/api/v1")
+app.include_router(watchlists_router.router, prefix="/api/v1")
 
 # Health check — mounted at both /api/v1/health and /health (for LB probes)
 app.include_router(health_router.router, prefix="/api/v1")

@@ -10,7 +10,12 @@ langchain
 langchain-openai
 websockets
 cryptography
+alembic
+passlib[bcrypt]
+bcrypt<5
+python-jose[cryptography]
 pydantic
+email-validator
 pydantic-settings
 yfinance
 redis

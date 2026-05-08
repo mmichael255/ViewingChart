@@ -4,9 +4,10 @@ Prometheus scrape endpoint. Gauges reflect ConnectionManager state at scrape tim
 
 import time
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
 
+from app.auth.deps import require_superadmin
 from app.services.stock_service import stock_service
 from app.services.websocket_manager import manager
 
@@ -91,7 +92,7 @@ _g_stock_regular_only_mode_enabled = Gauge(
 
 
 @router.get("/metrics")
-async def prometheus_metrics():
+async def prometheus_metrics(_=Depends(require_superadmin)):
     s = manager.get_status()
     now = time.time()
 

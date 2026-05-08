@@ -3,7 +3,7 @@ import json
 import logging
 import time
 from typing import Literal
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Depends
 from slowapi import Limiter
 from app.rate_limit_key import rate_limit_client_ip
 from app.services.binance_service import binance_service
@@ -11,6 +11,10 @@ from app.services.stock_service import stock_service
 from app.services.klines_db_service import get_klines_db_first
 from app.services.websocket_manager import manager
 from app.config import VALID_INTERVALS, VALID_ASSET_TYPES, SYMBOL_PATTERN, MAX_SYMBOLS_PER_REQUEST, MAX_SEARCH_QUERY_LENGTH
+from app.auth.security import decode_token
+from app.database.connection import get_db
+from app.database.models import User, Watchlist, WatchlistItem
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=rate_limit_client_ip)
@@ -76,25 +80,99 @@ def parse_symbol_list(raw: str) -> list[str]:
 # ── WebSocket endpoints (no rate limit — persistent connections) ──
 
 @router.websocket("/ws/tickers")
-async def websocket_tickers(websocket: WebSocket):
+async def websocket_tickers(
+    websocket: WebSocket,
+    token: str | None = Query(default=None),
+    watchlist_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    user_id: int | None = None
+    if token:
+        payload = decode_token(token)
+        sub = payload.get("sub")
+        try:
+            user_id = int(sub)
+        except Exception:
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+
+        user = db.query(User).filter(User.id == user_id, User.is_active == True).first()  # noqa: E712
+        if not user:
+            await websocket.close(code=1008, reason="User not found")
+            return
+
     await manager.connect_tickers(websocket)
     hb_task = asyncio.create_task(_ticker_ws_heartbeat(websocket))
+
+    def _default_watchlist_id() -> int | None:
+        if user_id is None:
+            return None
+        wl = (
+            db.query(Watchlist)
+            .filter(Watchlist.user_id == user_id)
+            .order_by(Watchlist.is_default.desc(), Watchlist.id.asc())
+            .first()
+        )
+        return wl.id if wl else None
+
+    async def _subscribe_from_watchlist(wl_id: int) -> None:
+        if user_id is None:
+            await websocket.close(code=1008, reason="Auth required for watchlist subscription")
+            return
+        items = (
+            db.query(WatchlistItem)
+            .join(Watchlist, WatchlistItem.watchlist_id == Watchlist.id)
+            .filter(Watchlist.user_id == user_id, Watchlist.id == wl_id, WatchlistItem.asset_type == "crypto")
+            .all()
+        )
+        syms = [i.symbol for i in items if i.symbol and SYMBOL_PATTERN.match(i.symbol)]
+        await manager.subscribe_tickers(websocket, syms)
+
+    # Auto-subscribe on connect (default watchlist or explicit watchlist_id)
+    wl_id = watchlist_id or _default_watchlist_id()
+    if wl_id:
+        try:
+            await _subscribe_from_watchlist(wl_id)
+        except Exception as e:
+            logger.error(f"WS ticker: initial watchlist subscribe failed: {e}")
     try:
         while True:
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
                 if msg.get("action") == "subscribe":
-                    symbols = msg.get("symbols", [])
-                    # Validate each symbol in the subscribe message
-                    valid_symbols = []
-                    for s in symbols:
-                        s = s.strip().upper()
-                        if SYMBOL_PATTERN.match(s):
-                            valid_symbols.append(s)
-                        else:
-                            logger.warning(f"WS ticker: rejected invalid symbol '{s}'")
-                    await manager.subscribe_tickers(websocket, valid_symbols)
+                    req_wl_id = msg.get("watchlistId")
+                    if isinstance(req_wl_id, int):
+                        await _subscribe_from_watchlist(req_wl_id)
+                        continue
+
+                    # Back-compat: allow symbols subscribe.
+                    requested = msg.get("symbols", [])
+                    if not isinstance(requested, list):
+                        requested = []
+                    requested_syms = []
+                    for s in requested:
+                        if not isinstance(s, str):
+                            continue
+                        s2 = s.strip().upper()
+                        if SYMBOL_PATTERN.match(s2):
+                            requested_syms.append(s2)
+
+                    # If authenticated: restrict to user's own watchlist items (prevents arbitrary symbol probing).
+                    # If anonymous: allow requesting symbols directly (validated/capped by client & regex).
+                    if user_id is not None:
+                        allowed_items = (
+                            db.query(WatchlistItem.symbol)
+                            .join(Watchlist, WatchlistItem.watchlist_id == Watchlist.id)
+                            .filter(Watchlist.user_id == user_id, WatchlistItem.asset_type == "crypto")
+                            .all()
+                        )
+                        allowed = {row[0].upper() for row in allowed_items if row and row[0]}
+                        valid = [s for s in requested_syms if s in allowed]
+                    else:
+                        valid = requested_syms[:MAX_SYMBOLS_PER_REQUEST]
+
+                    await manager.subscribe_tickers(websocket, valid)
             except json.JSONDecodeError:
                 logger.warning("WS ticker: received non-JSON message")
             except Exception as e:

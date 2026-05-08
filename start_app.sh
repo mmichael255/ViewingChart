@@ -19,6 +19,10 @@ fi
 # If the repo root .env is configured for nginx (path-only /api/v1), normalize to
 # direct backend URLs so Next.js doesn't 404 on its own dev server.
 if [[ "$MODE" == "dev" ]]; then
+  # Ensure backend runs in development mode locally, even if the repo root .env
+  # is configured for a production-like environment.
+  export ENVIRONMENT="development"
+
   # Local browser runs on localhost:* so ensure API CORS allows it.
   # Keep any user-provided CORS_ORIGINS and append common local dev origins.
   _DEV_CORS_APPEND="http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"

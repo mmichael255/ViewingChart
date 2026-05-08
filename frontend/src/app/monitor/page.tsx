@@ -3,6 +3,8 @@
 import { API_URL } from "@/config";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { UserMenu } from "@/components/UserMenu";
+import { getAccessToken } from "@/lib/auth";
 
 const POLL_MS = 3000;
 
@@ -45,13 +47,26 @@ export default function MonitorPage() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [authBlocked, setAuthBlocked] = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
+      const token = getAccessToken();
+      if (!token) {
+        setAuthBlocked(true);
+        setError("需要使用超级管理员账号登录才能访问 Monitor。");
+        return;
+      }
+
+      const headers = { Authorization: `Bearer ${token}` };
       const [hRes, wRes] = await Promise.all([
-        fetch(`${API_URL}/health`),
-        fetch(`${API_URL}/ws/status`),
+        fetch(`${API_URL}/health`, { headers }),
+        fetch(`${API_URL}/ws/status`, { headers }),
       ]);
+      if (hRes.status === 401 || hRes.status === 403 || wRes.status === 401 || wRes.status === 403) {
+        setAuthBlocked(true);
+        throw new Error("没有权限访问（需要超级管理员）。");
+      }
       if (!hRes.ok) throw new Error(`health HTTP ${hRes.status}`);
       if (!wRes.ok) throw new Error(`ws/status HTTP ${wRes.status}`);
       const h = (await hRes.json()) as HealthPayload;
@@ -67,9 +82,10 @@ export default function MonitorPage() {
 
   useEffect(() => {
     void fetchAll();
+    if (authBlocked) return;
     const id = setInterval(() => void fetchAll(), POLL_MS);
     return () => clearInterval(id);
-  }, [fetchAll]);
+  }, [fetchAll, authBlocked]);
 
   const redisOk = health?.checks?.redis === "ok";
   const spotOk = health?.checks?.binance_spot_ws === "ok";
@@ -87,13 +103,16 @@ export default function MonitorPage() {
               Upstream Binance feeder, Redis pub/sub, and browser WebSocket fan-out.
             </p>
           </div>
-          <div className="flex flex-col items-end gap-1 text-sm">
-            <Link href="/" className="text-[#2962FF] hover:underline">
-              ← Back to chart
-            </Link>
-            <span className="text-gray-500 text-xs font-mono">
-              {lastUpdated ? `Updated ${new Date(lastUpdated).toLocaleTimeString()}` : "—"}
-            </span>
+          <div className="flex items-center gap-4">
+            <div className="flex flex-col items-end gap-1 text-sm">
+              <Link href="/" className="text-[#2962FF] hover:underline">
+                ← Back to chart
+              </Link>
+              <span className="text-gray-500 text-xs font-mono">
+                {lastUpdated ? `Updated ${new Date(lastUpdated).toLocaleTimeString()}` : "—"}
+              </span>
+            </div>
+            <UserMenu />
           </div>
         </div>
 

@@ -6,14 +6,29 @@ import { SymbolDetailPanel } from './SymbolDetailPanel';
 import { API_URL, websocketApiBase } from '@/config';
 import type { KlineData, TickerData, WatchlistItem } from '@/types/market';
 import type { WsStatus } from '@/hooks/useMarketData';
+import { formatCountdownMs, useCountdownMs } from '@/hooks/useCountdown';
 import {
     MARKET_STALE_QUOTES_MS,
     RESYNC_AFTER_HIDDEN_MS,
     TRANSPORT_IDLE_TICKER_MS,
 } from '@/lib/connectionResilience';
 import { buildPrePostSegments, formatPrePostDelta } from '@/lib/prepost';
+import { getAccessToken } from '@/lib/auth';
+
+export interface WatchlistSummary {
+    id: number;
+    name: string;
+    is_default: boolean;
+}
 
 interface WatchlistSidebarProps {
+    watchlists?: WatchlistSummary[];
+    selectedWatchlistId?: number | null;
+    onSelectWatchlist?: (id: number) => void;
+    onCreateWatchlist?: () => void;
+    onRenameWatchlist?: () => void;
+    onDeleteWatchlist?: () => void;
+    onRemoveItem?: (sym: string, assetType: string) => void;
     cryptoWatchlist: WatchlistItem[];
     stockWatchlist: WatchlistItem[];
     symbol: string;
@@ -35,6 +50,13 @@ interface WatchlistSidebarProps {
 }
 
 export function WatchlistSidebar({
+    watchlists,
+    selectedWatchlistId,
+    onSelectWatchlist,
+    onCreateWatchlist,
+    onRenameWatchlist,
+    onDeleteWatchlist,
+    onRemoveItem,
     cryptoWatchlist,
     stockWatchlist,
     symbol,
@@ -50,6 +72,8 @@ export function WatchlistSidebar({
     const [tickers, setTickers] = useState<Record<string, TickerData>>({});
     const [tickerWsStatus, setTickerWsStatus] = useState<WsStatus>('disconnected');
     const wsRef = useRef<WebSocket | null>(null);
+    const [nextStockPollAtMs, setNextStockPollAtMs] = useState<number | null>(null);
+    const [stockPollError, setStockPollError] = useState<string | null>(null);
     const cryptoWatchlistRef = useRef(cryptoWatchlist);
     const stockWatchlistRef = useRef(stockWatchlist);
     useEffect(() => {
@@ -69,6 +93,7 @@ export function WatchlistSidebar({
     useEffect(() => {
         let timeoutId: number;
         let isActive = true;
+        const POLL_MS = 10_000;
 
         const fetchInitialTickers = async () => {
             try {
@@ -90,21 +115,26 @@ export function WatchlistSidebar({
                 try {
                     const stocks = stockWatchlist.map(i => i.sym).join(',');
                     const res = await fetch(`${API_URL}/market/tickers?stock_symbols=${stocks}`);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
                     const newData = await res.json();
                     if (isActive) {
                         setTickers(prev => ({ ...prev, ...newData }));
+                        setStockPollError(null);
+                        // Only reset countdown on successful fetch.
+                        setNextStockPollAtMs(Date.now() + POLL_MS);
                     }
                 } catch (err) {
                     console.error("Failed to fetch stock tickers:", err);
+                    if (isActive) setStockPollError((err as Error)?.message ?? 'fetch failed');
                 } finally {
                     if (isActive) {
-                        timeoutId = window.setTimeout(pollStocks, 10000);
+                        timeoutId = window.setTimeout(pollStocks, POLL_MS);
                     }
                 }
             };
 
             if (isActive) {
-                timeoutId = window.setTimeout(pollStocks, 10000);
+                timeoutId = window.setTimeout(pollStocks, POLL_MS);
             }
         };
 
@@ -220,7 +250,11 @@ export function WatchlistSidebar({
             if (isUnmounted) return;
 
             const wsBase = websocketApiBase();
-            const socket = new WebSocket(`${wsBase}/market/ws/tickers`);
+            const token = getAccessToken();
+            const url = token
+                ? `${wsBase}/market/ws/tickers?token=${encodeURIComponent(token)}`
+                : `${wsBase}/market/ws/tickers`;
+            const socket = new WebSocket(url);
             wsRef.current = socket;
 
             socket.onopen = () => {
@@ -233,10 +267,15 @@ export function WatchlistSidebar({
                 if (hadReconnect) {
                     void refreshPricesFromRest();
                 }
-                socket.send(JSON.stringify({
-                    action: 'subscribe',
-                    symbols: cryptoWatchlistRef.current.map(i => i.sym)
-                }));
+                const tokenNow = getAccessToken();
+                if (tokenNow && selectedWatchlistId) {
+                    socket.send(JSON.stringify({ action: 'subscribe', watchlistId: selectedWatchlistId }));
+                } else {
+                    socket.send(JSON.stringify({
+                        action: 'subscribe',
+                        symbols: cryptoWatchlistRef.current.map(i => i.sym)
+                    }));
+                }
             };
 
             socket.onmessage = (event) => {
@@ -300,30 +339,89 @@ export function WatchlistSidebar({
 
     useEffect(() => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-                action: 'subscribe',
-                symbols: cryptoWatchlist.map(i => i.sym)
-            }));
+            const tokenNow = getAccessToken();
+            if (tokenNow && selectedWatchlistId) {
+                wsRef.current.send(JSON.stringify({ action: 'subscribe', watchlistId: selectedWatchlistId }));
+            } else {
+                wsRef.current.send(JSON.stringify({
+                    action: 'subscribe',
+                    symbols: cryptoWatchlist.map(i => i.sym)
+                }));
+            }
         }
-    }, [cryptoWatchlist]);
+    }, [cryptoWatchlist, selectedWatchlistId]);
 
     const watchlistMeta = useMemo(() => {
         const all = [...cryptoWatchlist, ...stockWatchlist];
         return all.find((i) => i.sym === symbol) ?? null;
     }, [symbol, cryptoWatchlist, stockWatchlist]);
 
+    const stockPollRemainingMs = useCountdownMs(stockWatchlist.length > 0 ? nextStockPollAtMs : null);
+    const stockPollLabel = stockWatchlist.length > 0 && nextStockPollAtMs ? formatCountdownMs(stockPollRemainingMs) : null;
+
+    // No longer derive pinned close from the active chart; we prefer the batch-fetched daily close map.
+
     return (
         <aside className="w-[320px] shrink-0 flex flex-col border border-gray-800 bg-[#1E222D] overflow-hidden z-20 shadow-xl">
             <div className="flex flex-col h-full overflow-hidden">
                 <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden relative">
-                    <div className="px-4 py-4 border-b border-gray-800 flex justify-between items-center bg-[#1E222D]">
-                        <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest flex items-center gap-2">
-                            Watchlist
-                            <ConnectionDot status={tickerWsStatus} />
-                        </span>
+                    <div className="px-4 py-4 border-b border-gray-800 flex justify-between items-start bg-[#1E222D]">
+                        <div className="flex flex-col gap-1 min-w-0">
+                            <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest flex items-center gap-2">
+                                Watchlist
+                                <ConnectionDot status={tickerWsStatus} />
+                            </span>
+                            {stockPollLabel && (
+                                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
+                                    Stock refresh in <span className="tabular-nums text-gray-300">{stockPollLabel}</span>
+                                </span>
+                            )}
+                            {stockWatchlist.length > 0 && stockPollError && (
+                                <span className="text-[10px] font-bold text-red-300 uppercase tracking-widest" title={stockPollError}>
+                                    Stock quote fetch failed
+                                </span>
+                            )}
+                            {watchlists && watchlists.length > 0 && (
+                                <div className="mt-4 flex items-center gap-2">
+                                    <select
+                                        value={String(selectedWatchlistId ?? watchlists[0].id)}
+                                        onChange={(e) => onSelectWatchlist?.(Number(e.target.value))}
+                                        className="bg-[#131722] border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 outline-none focus:border-[#2962FF] max-w-[190px]"
+                                    >
+                                        {watchlists.map((w) => (
+                                            <option key={w.id} value={String(w.id)}>
+                                                {w.is_default ? "★ " : ""}
+                                                {w.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        onClick={onCreateWatchlist}
+                                        className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/40 hover:bg-gray-800 rounded px-2 py-1 transition-colors"
+                                        title="New list"
+                                    >
+                                        New
+                                    </button>
+                                    <button
+                                        onClick={onRenameWatchlist}
+                                        className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/40 hover:bg-gray-800 rounded px-2 py-1 transition-colors"
+                                        title="Rename list"
+                                    >
+                                        Rename
+                                    </button>
+                                    <button
+                                        onClick={onDeleteWatchlist}
+                                        className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/40 hover:bg-gray-800 rounded px-2 py-1 transition-colors"
+                                        title="Delete list"
+                                    >
+                                        Del
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                         <button
                             onClick={() => setSearchModalMode('add')}
-                            className="text-xs font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
+                            className="mt-[1px] text-xs font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
                         >
                             <span className="text-sm leading-none">＋</span> Add
                         </button>
@@ -336,20 +434,20 @@ export function WatchlistSidebar({
                     </div>
                     <div className="flex-1 overflow-y-auto p-1 scrollbar-thin scrollbar-thumb-gray-800">
                         <WatchlistGroup
-                            title="Crypto"
                             items={cryptoWatchlist}
                             tickers={tickers}
                             handleSymbolChange={handleSymbolChange}
                             symbol={symbol}
                             type="crypto"
+                            onRemoveItem={onRemoveItem}
                         />
                         <WatchlistGroup
-                            title="Stocks & FX"
                             items={stockWatchlist}
                             tickers={tickers}
                             handleSymbolChange={handleSymbolChange}
                             symbol={symbol}
                             type="stock"
+                            onRemoveItem={onRemoveItem}
                         />
                     </div>
                 </div>
@@ -423,23 +521,28 @@ function StockPrePostSecondRow({ ticker }: { ticker: TickerData }) {
 }
 
 interface WatchlistGroupProps {
-    title: string;
     items: WatchlistItem[];
     tickers: Record<string, TickerData>;
     handleSymbolChange: (newSymbol: string, type: string) => void;
     symbol: string;
     type: string;
+    onRemoveItem?: (sym: string, assetType: string) => void;
 }
 
 const EMPTY_TICKER: TickerData = { lastPrice: 0, priceChange: 0, priceChangePercent: 0 };
 
-const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, type }: WatchlistGroupProps) => (
+function displayLastForStock(t: TickerData): number {
+    // Match Yahoo-style UX: always show the quote's current `lastPrice`,
+    // which backend pins to pre/post/overnight depending on session.
+    // (Watchlist baseline/deltas are still shown separately in the 2nd row.)
+    return t.lastPrice;
+}
+
+const WatchlistGroup = ({ items, tickers, handleSymbolChange, symbol, type, onRemoveItem }: WatchlistGroupProps) => (
     <>
-        <div className="px-3 py-1 mb-1 mt-2">
-            <span className="text-[9px] font-black text-[#2962FF] uppercase tracking-widest">{title}</span>
-        </div>
         {items.map(({ sym, label, sub, source }) => {
             const ticker: TickerData = tickers[sym] ?? EMPTY_TICKER;
+            const shownLast = type === 'stock' ? displayLastForStock(ticker) : ticker.lastPrice;
             const isUp = ticker.priceChange >= 0;
             const colorClass = isUp ? 'text-green-400' : 'text-red-400';
             return (
@@ -450,14 +553,29 @@ const WatchlistGroup = ({ title, items, tickers, handleSymbolChange, symbol, typ
                 >
                     <div className="grid grid-cols-12 items-center px-3 py-2">
                         <div className="col-span-4 text-left">
-                            <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
+                            <div className="flex items-center gap-2">
+                                <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
+                                {onRemoveItem && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onRemoveItem(sym, type);
+                                        }}
+                                        className="opacity-0 group-hover:opacity-100 text-[10px] font-black text-gray-500 hover:text-red-300 bg-gray-900/30 hover:bg-red-500/10 border border-gray-800 hover:border-red-500/30 rounded px-1.5 py-0.5 transition-all"
+                                        title="Remove"
+                                    >
+                                        ✕
+                                    </button>
+                                )}
+                            </div>
                             <div className="text-[8px] text-gray-500 font-medium truncate mt-0.5 flex items-center gap-1">
                                 <span>{sub}</span>
                                 {source && <span className="text-[7px] uppercase bg-gray-800 px-1 py-0.5 rounded text-gray-400 tracking-widest">{source}</span>}
                             </div>
                         </div>
                         <div className="col-span-3 text-right">
-                            <PriceHighlight price={ticker.lastPrice} className="text-[11px] font-bold" />
+                            <PriceHighlight price={shownLast} className="text-[11px] font-bold" />
                         </div>
                         <div className={`col-span-2 text-right text-[10px] font-medium ${colorClass}`}>
                             {ticker.priceChange ? (ticker.priceChange > 0 ? '+' : '') + ticker.priceChange.toFixed(2) : '0.00'}

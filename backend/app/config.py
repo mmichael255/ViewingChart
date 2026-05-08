@@ -71,6 +71,13 @@ class Settings:
     # ── OpenAI ──
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+    # ── Auth (JWT) ──
+    # In dev, allow a default secret to avoid blocking local auth flows.
+    # In production, this MUST be set explicitly.
+    JWT_SECRET = os.getenv("JWT_SECRET") or ("" if ENVIRONMENT == "production" else "dev-insecure-jwt-secret")
+    JWT_ALG = os.getenv("JWT_ALG", "HS256")
+    JWT_ACCESS_TOKEN_EXPIRES_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_MINUTES", "10080"))  # 7d
+
 
 settings = Settings()
 
@@ -100,6 +107,9 @@ def validate_secrets():
     if settings.DB_PASSWORD in ("", "test123"):
         warnings.append("DB_PASSWORD is empty or default. Use a strong password in production.")
 
+    if not settings.JWT_SECRET:
+        warnings.append("JWT_SECRET is not set. Auth endpoints will refuse to mint/validate tokens.")
+
     for w in warnings:
         logger.warning(f"[CONFIG] {w}")
 
@@ -110,6 +120,7 @@ def validate_secrets():
     logger.info(f"[CONFIG] Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT} ({redis_auth})")
     logger.info(f"[CONFIG] AlphaVantage key: {mask_secret(settings.ALPHA_VANTAGE_API_KEY)}")
     logger.info(f"[CONFIG] iTick token: {mask_secret(settings.ITICK_API_TOKEN)}")
+    logger.info(f"[CONFIG] JWT secret: {mask_secret(settings.JWT_SECRET)}")
 
 
 # ── Shared Redis connection pool ──

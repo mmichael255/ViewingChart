@@ -22,14 +22,23 @@ export function useMarketData(
     includeExtended: boolean = false,
 ) {
     const includeExtendedParam = assetType === 'stock' ? false : includeExtended;
+    const stockRefreshIntervalMs = 60_000;
 
     // Fetch initial data
+    const [lastStockRestSuccessAtMs, setLastStockRestSuccessAtMs] = useState<number | null>(null);
+    const [lastStockRestErrorAtMs, setLastStockRestErrorAtMs] = useState<number | null>(null);
     const { data: initialData, error, isLoading, mutate } = useSWR<KlineData[]>(
         `${API_URL}/market/klines/${symbol}?interval=${interval}&asset_type=${assetType}&include_extended=${includeExtendedParam}`,
         fetcher,
         {
-            refreshInterval: assetType === 'stock' ? 60000 : 0, // Poll stocks only, WS handles crypto
-            revalidateOnFocus: false
+            refreshInterval: assetType === 'stock' ? stockRefreshIntervalMs : 0, // Poll stocks only, WS handles crypto
+            revalidateOnFocus: false,
+            onSuccess: () => {
+                if (assetType === 'stock') setLastStockRestSuccessAtMs(Date.now());
+            },
+            onError: () => {
+                if (assetType === 'stock') setLastStockRestErrorAtMs(Date.now());
+            },
         }
     );
 
@@ -55,7 +64,14 @@ export function useMarketData(
             initialDataRef.current = initialData;
             setRealtimeData(initialData);
         }
-    }, [initialData]);
+    }, [initialData, assetType]);
+
+    // Seed once on entry so countdown has a baseline.
+    useEffect(() => {
+        if (assetType !== 'stock') return;
+        setLastStockRestSuccessAtMs(Date.now());
+        setLastStockRestErrorAtMs(null);
+    }, [assetType, symbol, interval]);
 
     // Reset realtime slice only when symbol / interval / asset actually change, not on initial mount
     useEffect(() => {
@@ -281,5 +297,8 @@ export function useMarketData(
         isLoading,
         isError: error,
         wsStatus: assetType === 'crypto' ? wsStatus : ('connected' as WsStatus),
+        lastStockRestSuccessAtMs,
+        lastStockRestErrorAtMs,
+        stockRefreshIntervalMs,
     };
 }
