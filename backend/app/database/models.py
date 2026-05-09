@@ -21,7 +21,13 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, index=True, nullable=False)
     email = Column(String(100), unique=True, index=True, nullable=True)
+    password_hash = Column(String(255), nullable=False, default="")
+    role = Column(String(32), nullable=False, default="user")
+    display_name = Column(String(100), nullable=True)
+    avatar_url = Column(String(500), nullable=True)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     watchlists = relationship("Watchlist", back_populates="user")
 
@@ -31,9 +37,17 @@ class Watchlist(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     name = Column(String(50), default="My Watchlist")
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     user = relationship("User", back_populates="watchlists")
     items = relationship("WatchlistItem", back_populates="watchlist", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uk_watchlist_user_name"),
+        Index("idx_watchlists_user_default", "user_id", "is_default"),
+    )
 
 class WatchlistItem(Base):
     __tablename__ = "watchlist_items"
@@ -41,10 +55,19 @@ class WatchlistItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     watchlist_id = Column(Integer, ForeignKey("watchlists.id"))
     symbol = Column(String(20), nullable=False)
+    asset_type = Column(Enum("crypto", "stock", name="watchlist_asset_type_enum"), nullable=False, default="crypto")
     exchange = Column(String(20), default="BINANCE")
+    source = Column(String(32), nullable=True)
+    label = Column(String(64), nullable=True)
+    sub = Column(String(128), nullable=True)
     added_at = Column(DateTime, default=datetime.utcnow)
 
     watchlist = relationship("Watchlist", back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("watchlist_id", "symbol", "asset_type", name="uk_watchlist_item"),
+        Index("idx_watchlist_items_watchlist", "watchlist_id"),
+    )
 
 
 class Symbol(Base):

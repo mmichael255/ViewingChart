@@ -7,13 +7,19 @@ import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import type { CandlestickData, Time } from 'lightweight-charts';
-import type { TickerData } from '@/types/market';
+import type { KlineData, TickerData } from '@/types/market';
 import { WatchlistSidebar } from '@/components/WatchlistSidebar';
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
 import type { DrawingToolType } from '@/drawing';
 import Link from 'next/link';
 import { API_URL } from '@/config';
 import { buildPrePostSegments } from '@/lib/prepost';
+import { getAccessToken } from '@/lib/auth';
+import { fetchJson } from '@/lib/api';
+import type { WatchlistSummary } from '@/components/WatchlistSidebar';
+import type { WatchlistItem } from '@/types/market';
+import { UserMenu } from '@/components/UserMenu';
+import { formatCountdownMs, useCountdownMs } from '@/hooks/useCountdown';
 
 const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
@@ -30,12 +36,35 @@ const STOCK_WATCHLIST = [
   { sym: 'AAPL', label: 'AAPL', sub: 'Apple Inc.', source: 'Yahoo Finance' },
 ];
 
+type ApiWatchlistItem = {
+  id: number;
+  sym: string;
+  asset_type: 'crypto' | 'stock';
+  exchange?: string | null;
+  source?: string | null;
+  label?: string | null;
+  sub?: string | null;
+};
+
 const sessionLabel: Record<string, string> = {
   pre: 'Pre',
   regular: 'Regular',
   post: 'Post',
   overnight: 'Overnight',
   closed: 'Closed',
+};
+
+const INTERVAL_SECONDS: Record<string, number> = {
+  '1m': 60,
+  '3m': 180,
+  '5m': 300,
+  '15m': 900,
+  '30m': 1800,
+  '1h': 3600,
+  '4h': 14400,
+  '1d': 86400,
+  '1w': 604800,
+  '1M': 30 * 86400,
 };
 
 function formatEtTime(ts?: number): string {
@@ -53,8 +82,10 @@ export default function Home() {
   const [chartInterval, setChartInterval] = useState('1d');
   const [assetType, setAssetType] = useState('crypto');
 
-  const [cryptoWatchlist, setCryptoWatchlist] = useState(INITIAL_CRYPTO_WATCHLIST);
-  const [stockWatchlist, setStockWatchlist] = useState(STOCK_WATCHLIST);
+  const [watchlists, setWatchlists] = useState<WatchlistSummary[] | null>(null);
+  const [selectedWatchlistId, setSelectedWatchlistId] = useState<number | null>(null);
+  const [cryptoWatchlist, setCryptoWatchlist] = useState<WatchlistItem[]>(INITIAL_CRYPTO_WATCHLIST);
+  const [stockWatchlist, setStockWatchlist] = useState<WatchlistItem[]>(STOCK_WATCHLIST);
   const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
   // Two ticker sources for the active symbol:
   //   - watchlistTicker:    pushed up by <WatchlistSidebar> when symbol is in its map.
@@ -92,13 +123,58 @@ export default function Home() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const { data, isLoading, wsStatus } = useMarketData(symbol, chartInterval, assetType);
+  const { data, isLoading, wsStatus, lastStockRestSuccessAtMs, lastStockRestErrorAtMs, stockRefreshIntervalMs } = useMarketData(symbol, chartInterval, assetType);
   const extraTicker = extraTickerBySymbol[symbol];
   const selectedTicker = watchlistTicker ?? extraTicker;
+
+  // Avoid calling Date.now() during render (lint: react-hooks/purity).
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const id = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const chartData = useMemo(() => {
+    if (!data || !Array.isArray(data) || data.length === 0) return data;
+    if (assetType !== 'stock') return data;
+    // Only "live-close" the forming candle during regular session.
+    if (selectedTicker?.session && selectedTicker.session !== 'regular') return data;
+    const lastPrice = selectedTicker?.lastPrice;
+    if (typeof lastPrice !== 'number' || !Number.isFinite(lastPrice)) return data;
+
+    const last = data[data.length - 1] as KlineData;
+    const tLast = Number(last.time);
+    const sec = INTERVAL_SECONDS[chartInterval] ?? 0;
+    if (!sec || !Number.isFinite(tLast)) return data;
+
+    // Only "live-close" the currently-forming bar.
+    if (nowSec < tLast || nowSec >= tLast + sec) return data;
+
+    const patchedLast: KlineData = {
+      ...last,
+      close: lastPrice,
+      high: Math.max(Number(last.high ?? lastPrice), lastPrice),
+      low: Math.min(Number(last.low ?? lastPrice), lastPrice),
+    };
+    const out = data.slice();
+    out[out.length - 1] = patchedLast;
+    return out;
+  }, [data, assetType, selectedTicker?.lastPrice, selectedTicker?.session, chartInterval, nowSec]);
 
   const handleSelectedTickerChange = useCallback((ticker: TickerData | undefined) => {
     setWatchlistTicker(ticker);
   }, []);
+
+  const stockKlineNextAtMs =
+    assetType === 'stock' && lastStockRestSuccessAtMs
+      ? lastStockRestSuccessAtMs + (stockRefreshIntervalMs ?? 60_000)
+      : null;
+  const stockKlineRemainingMs = useCountdownMs(stockKlineNextAtMs);
+  const stockKlineCountdown = stockKlineNextAtMs ? formatCountdownMs(stockKlineRemainingMs) : null;
+  const stockKlineHasError =
+    assetType === 'stock' &&
+    !!lastStockRestErrorAtMs &&
+    (!lastStockRestSuccessAtMs || lastStockRestErrorAtMs > lastStockRestSuccessAtMs);
 
   // One-shot REST fetch for stock tickers the sidebar doesn't know about
   // (e.g. user searched a symbol not in the watchlist). The sidebar takes over
@@ -128,6 +204,145 @@ export default function Home() {
       controller.abort();
     };
   }, [assetType, symbol, watchlistTicker, extraTickerBySymbol]);
+
+  const token = typeof window !== 'undefined' ? getAccessToken() : null;
+  const [me, setMe] = useState<{ role?: string | null } | null>(null);
+
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (!token) {
+      setMe(null);
+      return;
+    }
+    (async () => {
+      try {
+        const data = await fetchJson<{ role?: string | null }>('/me', { auth: true });
+        setMe(data);
+      } catch {
+        setMe(null);
+      }
+    })();
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [token]);
+
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (!token) {
+      setWatchlists(null);
+      setSelectedWatchlistId(null);
+      setCryptoWatchlist(INITIAL_CRYPTO_WATCHLIST);
+      setStockWatchlist(STOCK_WATCHLIST);
+      return;
+    }
+
+    (async () => {
+      try {
+        const wls = await fetchJson<WatchlistSummary[]>('/watchlists', { auth: true });
+        setWatchlists(wls);
+        const def = wls.find(w => w.is_default) ?? wls[0];
+        if (def) setSelectedWatchlistId(def.id);
+      } catch {
+        setWatchlists(null);
+        setSelectedWatchlistId(null);
+      }
+    })();
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || !selectedWatchlistId) return;
+    (async () => {
+      try {
+        const items = await fetchJson<ApiWatchlistItem[]>(
+          `/watchlists/${selectedWatchlistId}/items`,
+          { auth: true },
+        );
+        const crypto: WatchlistItem[] = [];
+        const stocks: WatchlistItem[] = [];
+        for (const i of items) {
+          const mapped: WatchlistItem = {
+            sym: i.sym,
+            label: i.label ?? i.sym,
+            sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
+            source: i.source ?? undefined,
+          };
+          if (i.asset_type === 'stock') stocks.push(mapped);
+          else crypto.push(mapped);
+        }
+        setCryptoWatchlist(crypto);
+        setStockWatchlist(stocks);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [token, selectedWatchlistId]);
+
+  async function createWatchlist() {
+    if (!token) return;
+    const name = window.prompt('New watchlist name?');
+    if (!name) return;
+    const wl = await fetchJson<WatchlistSummary>('/watchlists', {
+      method: 'POST',
+      auth: true,
+      body: JSON.stringify({ name, is_default: false }),
+    });
+    const wls = await fetchJson<WatchlistSummary[]>('/watchlists', { auth: true });
+    setWatchlists(wls);
+    setSelectedWatchlistId(wl.id);
+  }
+
+  async function renameWatchlist() {
+    if (!token || !selectedWatchlistId || !watchlists) return;
+    const cur = watchlists.find(w => w.id === selectedWatchlistId);
+    const name = window.prompt('Rename watchlist:', cur?.name ?? '');
+    if (!name) return;
+    await fetchJson<WatchlistSummary>(`/watchlists/${selectedWatchlistId}`, {
+      method: 'PATCH',
+      auth: true,
+      body: JSON.stringify({ name }),
+    });
+    const wls = await fetchJson<WatchlistSummary[]>('/watchlists', { auth: true });
+    setWatchlists(wls);
+  }
+
+  async function deleteWatchlist() {
+    if (!token || !selectedWatchlistId) return;
+    if (!window.confirm('Delete this watchlist?')) return;
+    await fetchJson<void>(`/watchlists/${selectedWatchlistId}`, { method: 'DELETE', auth: true });
+    const wls = await fetchJson<WatchlistSummary[]>('/watchlists', { auth: true });
+    setWatchlists(wls);
+    const def = wls.find(w => w.is_default) ?? wls[0] ?? null;
+    setSelectedWatchlistId(def?.id ?? null);
+  }
+
+  async function removeItem(sym: string, itemType: string) {
+    if (!token || !selectedWatchlistId) return;
+    const items = await fetchJson<ApiWatchlistItem[]>(
+      `/watchlists/${selectedWatchlistId}/items`,
+      { auth: true },
+    );
+    const target = items.find(i => i.sym === sym && i.asset_type === (itemType === 'stock' ? 'stock' : 'crypto'));
+    if (!target) return;
+    await fetchJson<void>(`/watchlists/${selectedWatchlistId}/items/${target.id}`, { method: 'DELETE', auth: true });
+    const refreshed = await fetchJson<ApiWatchlistItem[]>(
+      `/watchlists/${selectedWatchlistId}/items`,
+      { auth: true },
+    );
+    const crypto: WatchlistItem[] = [];
+    const stocks: WatchlistItem[] = [];
+    for (const i of refreshed) {
+      const mapped: WatchlistItem = {
+        sym: i.sym,
+        label: i.label ?? i.sym,
+        sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
+        source: i.source ?? undefined,
+      };
+      if (i.asset_type === 'stock') stocks.push(mapped);
+      else crypto.push(mapped);
+    }
+    setCryptoWatchlist(crypto);
+    setStockWatchlist(stocks);
+  }
 
   /** Same last bar as the chart / kline stream (REST + WS merged in useMarketData). */
   const lastClose = useMemo(() => {
@@ -226,14 +441,16 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-3 justify-end w-1/4">
-          <Link
-            href="/monitor"
-            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-            title="Connection monitor"
-          >
-            Monitor
-          </Link>
-          <div className="w-7 h-7 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400 cursor-pointer hover:bg-gray-600">👤</div>
+          {me?.role === 'superadmin' && (
+            <Link
+              href="/monitor"
+              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              title="Connection monitor"
+            >
+              Monitor
+            </Link>
+          )}
+          <UserMenu />
         </div>
       </header>
 
@@ -319,6 +536,22 @@ export default function Home() {
                     }`}
                   >
                     {wsStatus === 'reconnecting' ? 'Reconnecting' : 'Offline'}
+                  </span>
+                )}
+                {assetType === 'stock' && stockKlineCountdown && (
+                  <span
+                    title="Next REST kline refresh"
+                    className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-800/50 text-gray-300"
+                  >
+                    Fetch in <span className="tabular-nums">{stockKlineCountdown}</span>
+                  </span>
+                )}
+                {stockKlineHasError && (
+                  <span
+                    title="Last stock kline fetch failed"
+                    className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300"
+                  >
+                    Kline fetch failed
                   </span>
                 )}
               </div>
@@ -408,7 +641,7 @@ export default function Home() {
                 </div>
               )}
               <div className="flex-1 min-h-0 relative">
-                {data && <ChartComponent data={data as unknown as CandlestickData<Time>[]} symbol={symbol} indicators={activeIndicators} activeTool={activeTool} />}
+                {chartData && <ChartComponent data={chartData as unknown as CandlestickData<Time>[]} symbol={symbol} indicators={activeIndicators} activeTool={activeTool} />}
               </div>
 
               {/* ── Bottom Stack ── */}
@@ -425,12 +658,19 @@ export default function Home() {
         </main>
 
         <WatchlistSidebar
+          watchlists={watchlists ?? undefined}
+          selectedWatchlistId={selectedWatchlistId}
+          onSelectWatchlist={(id) => setSelectedWatchlistId(id)}
+          onCreateWatchlist={token ? createWatchlist : undefined}
+          onRenameWatchlist={token ? renameWatchlist : undefined}
+          onDeleteWatchlist={token ? deleteWatchlist : undefined}
+          onRemoveItem={token ? removeItem : undefined}
           cryptoWatchlist={cryptoWatchlist}
           stockWatchlist={stockWatchlist}
           symbol={symbol}
           assetType={assetType}
           chartInterval={chartInterval}
-          chartKlines={data}
+          chartKlines={chartData}
           chartKlinesLoading={isLoading}
           mergedTicker={selectedTicker}
           handleSymbolChange={handleSymbolChange}
@@ -454,14 +694,48 @@ export default function Home() {
                 mode={searchModalMode}
                 onSelect={(sym, type, source) => {
                   if (searchModalMode === 'add') {
-                    if (type === 'crypto') {
-                      if (!cryptoWatchlist.find(i => i.sym === sym)) {
-                        const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
-                        setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto', source: source || 'Binance' }]);
-                      }
+                    if (token && selectedWatchlistId) {
+                      void (async () => {
+                        await fetchJson(`/watchlists/${selectedWatchlistId}/items`, {
+                          method: 'POST',
+                          auth: true,
+                          body: JSON.stringify({
+                            sym,
+                            asset_type: type === 'stock' ? 'stock' : 'crypto',
+                            source: source || (type === 'stock' ? 'Yahoo Finance' : 'Binance'),
+                            label: type === 'crypto' ? (sym.endsWith('USDT') ? sym.replace('USDT', '') : sym) : sym,
+                            sub: type === 'stock' ? 'Stock/FX' : 'Crypto',
+                          }),
+                        });
+                        const items = await fetchJson<ApiWatchlistItem[]>(
+                          `/watchlists/${selectedWatchlistId}/items`,
+                          { auth: true },
+                        );
+                        const crypto: WatchlistItem[] = [];
+                        const stocks: WatchlistItem[] = [];
+                        for (const i of items) {
+                          const mapped: WatchlistItem = {
+                            sym: i.sym,
+                            label: i.label ?? i.sym,
+                            sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
+                            source: i.source ?? undefined,
+                          };
+                          if (i.asset_type === 'stock') stocks.push(mapped);
+                          else crypto.push(mapped);
+                        }
+                        setCryptoWatchlist(crypto);
+                        setStockWatchlist(stocks);
+                      })();
                     } else {
-                      if (!stockWatchlist.find(i => i.sym === sym)) {
-                        setStockWatchlist(prev => [...prev, { sym, label: sym, sub: 'Stock/FX', source: source || 'Yahoo Finance' }]);
+                      if (type === 'crypto') {
+                        if (!cryptoWatchlist.find(i => i.sym === sym)) {
+                          const label = sym.endsWith('USDT') ? sym.replace('USDT', '') : sym;
+                          setCryptoWatchlist(prev => [...prev, { sym, label, sub: 'Crypto', source: source || 'Binance' }]);
+                        }
+                      } else {
+                        if (!stockWatchlist.find(i => i.sym === sym)) {
+                          setStockWatchlist(prev => [...prev, { sym, label: sym, sub: 'Stock/FX', source: source || 'Yahoo Finance' }]);
+                        }
                       }
                     }
                   } else {
