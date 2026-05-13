@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.deps import get_current_user
@@ -23,6 +24,7 @@ class WatchlistItemResponse(BaseModel):
     id: int
     sym: str
     asset_type: str
+    position: int
     exchange: str | None = None
     source: str | None = None
     label: str | None = None
@@ -46,6 +48,15 @@ class AddWatchlistItemRequest(BaseModel):
     source: str | None = Field(default=None, max_length=32)
     label: str | None = Field(default=None, max_length=64)
     sub: str | None = Field(default=None, max_length=128)
+
+
+class ReorderWatchlistItemsRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1)
+
+
+class CopyWatchlistItemsRequest(BaseModel):
+    from_watchlist_id: int
+    item_ids: list[int] | None = None
 
 
 def _get_watchlist_or_404(db: Session, *, user_id: int, watchlist_id: int) -> Watchlist:
@@ -150,7 +161,7 @@ def list_items(
     items = (
         db.query(WatchlistItem)
         .filter(WatchlistItem.watchlist_id == wl.id)
-        .order_by(WatchlistItem.id.asc())
+        .order_by(WatchlistItem.position.asc(), WatchlistItem.id.asc())
         .all()
     )
     return [
@@ -158,6 +169,7 @@ def list_items(
             id=i.id,
             sym=i.symbol,
             asset_type=i.asset_type,
+            position=int(i.position),
             exchange=i.exchange,
             source=i.source,
             label=i.label,
@@ -176,8 +188,16 @@ def add_item(
 ):
     wl = _get_watchlist_or_404(db, user_id=current_user.id, watchlist_id=watchlist_id)
 
+    max_pos = (
+        db.query(func.max(WatchlistItem.position))
+        .filter(WatchlistItem.watchlist_id == wl.id)
+        .scalar()
+    )
+    next_pos = int(max_pos) + 1 if max_pos is not None else 0
+
     item = WatchlistItem(
         watchlist_id=wl.id,
+        position=next_pos,
         symbol=payload.sym.strip().upper(),
         asset_type=payload.asset_type,
         exchange=(payload.exchange.strip() if payload.exchange else "BINANCE"),
@@ -197,11 +217,96 @@ def add_item(
         id=item.id,
         sym=item.symbol,
         asset_type=item.asset_type,
+        position=int(item.position),
         exchange=item.exchange,
         source=item.source,
         label=item.label,
         sub=item.sub,
     )
+
+
+@router.put("/{watchlist_id}/items/reorder", status_code=204)
+def reorder_items(
+    watchlist_id: int,
+    payload: ReorderWatchlistItemsRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    wl = _get_watchlist_or_404(db, user_id=current_user.id, watchlist_id=watchlist_id)
+
+    ids = payload.item_ids
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=400, detail="Duplicate item ids")
+
+    items = (
+        db.query(WatchlistItem)
+        .filter(WatchlistItem.watchlist_id == wl.id, WatchlistItem.id.in_(ids))
+        .all()
+    )
+    if len(items) != len(ids):
+        raise HTTPException(status_code=400, detail="Some items not found in this watchlist")
+
+    by_id = {i.id: i for i in items}
+    for pos, item_id in enumerate(ids):
+        by_id[item_id].position = int(pos)
+
+    db.commit()
+    return None
+
+
+@router.post("/{watchlist_id}/items/copy", status_code=204)
+def copy_items_from_watchlist(
+    watchlist_id: int,
+    payload: CopyWatchlistItemsRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dst = _get_watchlist_or_404(db, user_id=current_user.id, watchlist_id=watchlist_id)
+    src = _get_watchlist_or_404(db, user_id=current_user.id, watchlist_id=payload.from_watchlist_id)
+
+    q = db.query(WatchlistItem).filter(WatchlistItem.watchlist_id == src.id)
+    if payload.item_ids:
+        q = q.filter(WatchlistItem.id.in_(payload.item_ids))
+    src_items = q.order_by(WatchlistItem.position.asc(), WatchlistItem.id.asc()).all()
+    if not src_items:
+        return None
+
+    max_pos = (
+        db.query(func.max(WatchlistItem.position))
+        .filter(WatchlistItem.watchlist_id == dst.id)
+        .scalar()
+    )
+    next_pos = int(max_pos) + 1 if max_pos is not None else 0
+
+    existing_keys = set(
+        db.query(WatchlistItem.symbol, WatchlistItem.asset_type)
+        .filter(WatchlistItem.watchlist_id == dst.id)
+        .all()
+    )
+
+    created_any = False
+    for si in src_items:
+        key = (si.symbol, si.asset_type)
+        if key in existing_keys:
+            continue
+        item = WatchlistItem(
+            watchlist_id=dst.id,
+            position=next_pos,
+            symbol=si.symbol,
+            asset_type=si.asset_type,
+            exchange=si.exchange,
+            source=si.source,
+            label=si.label,
+            sub=si.sub,
+        )
+        db.add(item)
+        existing_keys.add(key)
+        created_any = True
+        next_pos += 1
+
+    if created_any:
+        db.commit()
+    return None
 
 
 @router.delete("/{watchlist_id}/items/{item_id}", status_code=204)

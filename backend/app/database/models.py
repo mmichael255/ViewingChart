@@ -54,6 +54,8 @@ class WatchlistItem(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     watchlist_id = Column(Integer, ForeignKey("watchlists.id"))
+    # Position within a watchlist. Lower comes first.
+    position = Column(Integer, nullable=False, default=0)
     symbol = Column(String(20), nullable=False)
     asset_type = Column(Enum("crypto", "stock", name="watchlist_asset_type_enum"), nullable=False, default="crypto")
     exchange = Column(String(20), default="BINANCE")
@@ -67,6 +69,7 @@ class WatchlistItem(Base):
     __table_args__ = (
         UniqueConstraint("watchlist_id", "symbol", "asset_type", name="uk_watchlist_item"),
         Index("idx_watchlist_items_watchlist", "watchlist_id"),
+        Index("idx_watchlist_items_watchlist_position", "watchlist_id", "position"),
     )
 
 

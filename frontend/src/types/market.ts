@@ -27,8 +27,11 @@ export interface TickerData {
 }
 
 export interface WatchlistItem {
+    id?: number;
     sym: string;
     label: string;
     sub: string;
     source?: string;
+    asset_type?: "crypto" | "stock";
+    position?: number;
 }

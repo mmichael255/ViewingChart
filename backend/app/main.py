@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -39,12 +40,26 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting Binance stream manager...")
     task = asyncio.create_task(manager.start_binance_stream())
+
+    # Background kline scheduler (honours KLINE_SCHEDULER_ENABLED env var).
+    scheduler_task: asyncio.Task | None = None
+    if os.getenv("KLINE_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        from app.services.kline_scheduler import kline_scheduler
+
+        logger.info("Starting kline background scheduler...")
+        scheduler_task = asyncio.create_task(kline_scheduler.run())
+
     logger.info("ViewingChart backend is ready.")
     yield
     # Graceful shutdown
     logger.info("Shutting down...")
     manager.running = False
     task.cancel()
+    if scheduler_task is not None:
+        from app.services.kline_scheduler import kline_scheduler
+
+        kline_scheduler.running = False
+        scheduler_task.cancel()
     await binance_service.close()
     await stock_service.close()
     logger.info("Shutdown complete.")

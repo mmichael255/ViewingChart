@@ -40,6 +40,7 @@ type ApiWatchlistItem = {
   id: number;
   sym: string;
   asset_type: 'crypto' | 'stock';
+  position: number;
   exchange?: string | null;
   source?: string | null;
   label?: string | null;
@@ -84,6 +85,7 @@ export default function Home() {
 
   const [watchlists, setWatchlists] = useState<WatchlistSummary[] | null>(null);
   const [selectedWatchlistId, setSelectedWatchlistId] = useState<number | null>(null);
+  const [orderedWatchlistItems, setOrderedWatchlistItems] = useState<ApiWatchlistItem[] | null>(null);
   const [cryptoWatchlist, setCryptoWatchlist] = useState<WatchlistItem[]>(INITIAL_CRYPTO_WATCHLIST);
   const [stockWatchlist, setStockWatchlist] = useState<WatchlistItem[]>(STOCK_WATCHLIST);
   const [searchModalMode, setSearchModalMode] = useState<'closed' | 'search' | 'add'>('closed');
@@ -176,6 +178,20 @@ export default function Home() {
     !!lastStockRestErrorAtMs &&
     (!lastStockRestSuccessAtMs || lastStockRestErrorAtMs > lastStockRestSuccessAtMs);
 
+  /** Stable reference for sidebar — avoids resetting edit order every parent render. */
+  const sidebarOrderedItems = useMemo((): WatchlistItem[] | undefined => {
+    if (!orderedWatchlistItems?.length) return undefined;
+    return orderedWatchlistItems.map((i) => ({
+      id: i.id,
+      sym: i.sym,
+      label: i.label ?? i.sym,
+      sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
+      source: i.source ?? undefined,
+      asset_type: i.asset_type,
+      position: i.position,
+    }));
+  }, [orderedWatchlistItems]);
+
   // One-shot REST fetch for stock tickers the sidebar doesn't know about
   // (e.g. user searched a symbol not in the watchlist). The sidebar takes over
   // refresh once it starts polling the symbol; this just seeds the chart-bar
@@ -257,14 +273,18 @@ export default function Home() {
           `/watchlists/${selectedWatchlistId}/items`,
           { auth: true },
         );
+        setOrderedWatchlistItems(items);
         const crypto: WatchlistItem[] = [];
         const stocks: WatchlistItem[] = [];
         for (const i of items) {
           const mapped: WatchlistItem = {
+            id: i.id,
             sym: i.sym,
             label: i.label ?? i.sym,
             sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
             source: i.source ?? undefined,
+            asset_type: i.asset_type,
+            position: i.position,
           };
           if (i.asset_type === 'stock') stocks.push(mapped);
           else crypto.push(mapped);
@@ -317,31 +337,80 @@ export default function Home() {
 
   async function removeItem(sym: string, itemType: string) {
     if (!token || !selectedWatchlistId) return;
-    const items = await fetchJson<ApiWatchlistItem[]>(
-      `/watchlists/${selectedWatchlistId}/items`,
-      { auth: true },
-    );
-    const target = items.find(i => i.sym === sym && i.asset_type === (itemType === 'stock' ? 'stock' : 'crypto'));
+    const target =
+      orderedWatchlistItems?.find(
+        i => i.sym === sym && i.asset_type === (itemType === 'stock' ? 'stock' : 'crypto'),
+      ) ??
+      (
+        await fetchJson<ApiWatchlistItem[]>(
+          `/watchlists/${selectedWatchlistId}/items`,
+          { auth: true },
+        )
+      ).find(i => i.sym === sym && i.asset_type === (itemType === 'stock' ? 'stock' : 'crypto'));
     if (!target) return;
     await fetchJson<void>(`/watchlists/${selectedWatchlistId}/items/${target.id}`, { method: 'DELETE', auth: true });
     const refreshed = await fetchJson<ApiWatchlistItem[]>(
       `/watchlists/${selectedWatchlistId}/items`,
       { auth: true },
     );
+    setOrderedWatchlistItems(refreshed);
     const crypto: WatchlistItem[] = [];
     const stocks: WatchlistItem[] = [];
     for (const i of refreshed) {
       const mapped: WatchlistItem = {
+        id: i.id,
         sym: i.sym,
         label: i.label ?? i.sym,
         sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
         source: i.source ?? undefined,
+        asset_type: i.asset_type,
+        position: i.position,
       };
       if (i.asset_type === 'stock') stocks.push(mapped);
       else crypto.push(mapped);
     }
     setCryptoWatchlist(crypto);
     setStockWatchlist(stocks);
+  }
+
+  async function reorderWatchlistItemsByIds(itemIds: number[]) {
+    if (!token || !selectedWatchlistId) return;
+    await fetchJson<void>(`/watchlists/${selectedWatchlistId}/items/reorder`, {
+      method: 'PUT',
+      auth: true,
+      body: JSON.stringify({ item_ids: itemIds }),
+    });
+    const refreshed = await fetchJson<ApiWatchlistItem[]>(
+      `/watchlists/${selectedWatchlistId}/items`,
+      { auth: true },
+    );
+    setOrderedWatchlistItems(refreshed);
+    const crypto: WatchlistItem[] = [];
+    const stocks: WatchlistItem[] = [];
+    for (const i of refreshed) {
+      const mapped: WatchlistItem = {
+        id: i.id,
+        sym: i.sym,
+        label: i.label ?? i.sym,
+        sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
+        source: i.source ?? undefined,
+        asset_type: i.asset_type,
+        position: i.position,
+      };
+      if (i.asset_type === 'stock') stocks.push(mapped);
+      else crypto.push(mapped);
+    }
+    setCryptoWatchlist(crypto);
+    setStockWatchlist(stocks);
+  }
+
+  async function copyItemToWatchlist(itemId: number, destWatchlistId: number) {
+    if (!token || !selectedWatchlistId) return;
+    await fetchJson<void>(`/watchlists/${destWatchlistId}/items/copy`, {
+      method: 'POST',
+      auth: true,
+      body: JSON.stringify({ from_watchlist_id: selectedWatchlistId, item_ids: [itemId] }),
+    });
   }
 
   /** Same last bar as the chart / kline stream (REST + WS merged in useMarketData). */
@@ -665,6 +734,9 @@ export default function Home() {
           onRenameWatchlist={token ? renameWatchlist : undefined}
           onDeleteWatchlist={token ? deleteWatchlist : undefined}
           onRemoveItem={token ? removeItem : undefined}
+          orderedItems={sidebarOrderedItems}
+          onReorderItems={token ? reorderWatchlistItemsByIds : undefined}
+          onCopyItemToWatchlist={token ? copyItemToWatchlist : undefined}
           cryptoWatchlist={cryptoWatchlist}
           stockWatchlist={stockWatchlist}
           symbol={symbol}
@@ -711,14 +783,18 @@ export default function Home() {
                           `/watchlists/${selectedWatchlistId}/items`,
                           { auth: true },
                         );
+                        setOrderedWatchlistItems(items);
                         const crypto: WatchlistItem[] = [];
                         const stocks: WatchlistItem[] = [];
                         for (const i of items) {
                           const mapped: WatchlistItem = {
+                            id: i.id,
                             sym: i.sym,
                             label: i.label ?? i.sym,
                             sub: i.sub ?? (i.asset_type === 'stock' ? 'Stock/FX' : 'Crypto'),
                             source: i.source ?? undefined,
+                            asset_type: i.asset_type,
+                            position: i.position,
                           };
                           if (i.asset_type === 'stock') stocks.push(mapped);
                           else crypto.push(mapped);
