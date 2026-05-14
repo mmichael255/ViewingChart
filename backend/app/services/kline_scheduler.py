@@ -4,6 +4,11 @@ superadmin's watchlists and persists them to MariaDB.
 
 Main intervals (1m, 15m, 1h, 4h, 1d) are fetched directly from APIs.
 Derived intervals (3m, 5m, 30m, 1w, 1M) are aggregated from stored data.
+
+Two-tier cycle:
+  - Fast cycle (every CYCLE_INTERVAL_SECONDS, default 15min): tail-fill + aggregation
+  - Deep cycle (every DEEP_CYCLE_INTERVAL_SECONDS, default 24h): full-history backfill
+    for new symbols, early-gap backfill, internal gap scan, and auto-correct.
 """
 
 import asyncio
@@ -41,6 +46,20 @@ DERIVED_MAP: dict[str, tuple[str, int | str]] = {
     "1M": ("1d", "calendar_month"),
 }
 
+# Binance-style intervals → seconds (same as klines_db_service).
+_BAR_INTERVAL_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14_400,
+    "1d": 86_400,
+    "1w": 604_800,
+    "1M": 30 * 86_400,
+}
+
 
 class RateLimiter:
     """Sliding-window per-minute call cap for a single async consumer."""
@@ -52,7 +71,6 @@ class RateLimiter:
 
     async def acquire(self) -> None:
         now = time.monotonic()
-        # Evict timestamps outside the 60 s window.
         while self._timestamps and self._timestamps[0] < now - 60.0:
             self._timestamps.popleft()
         if len(self._timestamps) >= self.max_calls:
@@ -63,7 +81,6 @@ class RateLimiter:
                     self.name, wait, len(self._timestamps), self.max_calls,
                 )
                 await asyncio.sleep(wait)
-                # Re-check after sleep (more tokens may have freed).
                 return await self.acquire()
         self._timestamps.append(time.monotonic())
 
@@ -71,38 +88,43 @@ class RateLimiter:
 class KlineScheduler:
     """Periodically fetches & persists klines for superadmin watchlist symbols."""
 
-    CYCLE_INTERVAL_SECONDS = int(
-        os.getenv("KLINE_SCHEDULER_CYCLE_S", "900")
-    )  # 15 min
-    INITIAL_BACKFILL_LIMIT = int(
-        os.getenv("KLINE_SCHEDULER_BACKFILL_LIMIT", "1000")
-    )
+    CYCLE_INTERVAL_SECONDS = int(os.getenv("KLINE_SCHEDULER_CYCLE_S", "900"))  # 15 min
+    DEEP_CYCLE_INTERVAL_SECONDS = int(os.getenv("KLINE_SCHEDULER_DEEP_CYCLE_S", "86400"))  # 24h
     TAIL_FETCH_LIMIT = int(os.getenv("KLINE_SCHEDULER_TAIL_LIMIT", "100"))
-    BINANCE_RATE_LIMIT = int(
-        os.getenv("KLINE_SCHEDULER_BINANCE_RPM", "600")
-    )
-    YFINANCE_RATE_LIMIT = int(
-        os.getenv("KLINE_SCHEDULER_YFINANCE_RPM", "20")
-    )
+    BACKFILL_LIMIT_1M = int(os.getenv("KLINE_SCHEDULER_BACKFILL_LIMIT_1M", "1000000"))
+    BACKFILL_LIMIT = int(os.getenv("KLINE_SCHEDULER_BACKFILL_LIMIT", "200000"))
+    SCAN_WINDOW = int(os.getenv("KLINE_SCHEDULER_SCAN_WINDOW", "5000"))
+    CORRECTION_LIMIT = int(os.getenv("KLINE_SCHEDULER_CORRECTION_LIMIT", "200"))
+    BINANCE_RATE_LIMIT = int(os.getenv("KLINE_SCHEDULER_BINANCE_RPM", "600"))
+    YFINANCE_RATE_LIMIT = int(os.getenv("KLINE_SCHEDULER_YFINANCE_RPM", "20"))
 
     def __init__(self) -> None:
         self.running = False
         self._binance_limiter = RateLimiter(self.BINANCE_RATE_LIMIT, "binance")
         self._yfinance_limiter = RateLimiter(self.YFINANCE_RATE_LIMIT, "yfinance")
+        self._last_deep_cycle_time: float = 0.0
 
     # ── Main loop ─────────────────────────────────────────────────────────
 
     async def run(self) -> None:
         self.running = True
         logger.info(
-            "KlineScheduler started (cycle=%ds, binance_rpm=%d, yfinance_rpm=%d)",
+            "KlineScheduler started (cycle=%ds, deep_cycle=%ds, "
+            "binance_rpm=%d, yfinance_rpm=%d)",
             self.CYCLE_INTERVAL_SECONDS,
+            self.DEEP_CYCLE_INTERVAL_SECONDS,
             self.BINANCE_RATE_LIMIT,
             self.YFINANCE_RATE_LIMIT,
         )
 
         while self.running:
             cycle_start = time.monotonic()
+            now_ts = time.time()
+            is_deep = (
+                self.DEEP_CYCLE_INTERVAL_SECONDS > 0
+                and (now_ts - self._last_deep_cycle_time) >= self.DEEP_CYCLE_INTERVAL_SECONDS
+            )
+
             try:
                 symbols = self._load_superadmin_symbols_sync()
                 if not symbols:
@@ -111,9 +133,14 @@ class KlineScheduler:
                     )
                 else:
                     logger.info(
-                        "KlineScheduler cycle: %d symbols", len(symbols)
+                        "KlineScheduler %s cycle: %d symbols",
+                        "DEEP" if is_deep else "fast", len(symbols),
                     )
-                    await self._process_all_symbols(symbols)
+                    await self._process_fast_cycle(symbols)
+                    if is_deep:
+                        logger.info("KlineScheduler: starting deep cycle work…")
+                        await self._process_deep_cycle(symbols)
+                        self._last_deep_cycle_time = time.time()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -163,7 +190,6 @@ class KlineScheduler:
                 .distinct()
                 .all()
             )
-            # asset_type is a Python enum in the ORM; extract its .value.
             result: list[dict[str, str]] = []
             seen: set[tuple[str, str]] = set()
             for r in rows:
@@ -180,15 +206,16 @@ class KlineScheduler:
         finally:
             db.close()
 
-    # ── Per-cycle processing ──────────────────────────────────────────────
+    # ── Fast cycle ────────────────────────────────────────────────────────
 
-    async def _process_all_symbols(self, symbols: list[dict[str, str]]) -> None:
+    async def _process_fast_cycle(self, symbols: list[dict[str, str]]) -> None:
+        """Tail-fill main intervals, then aggregate derived intervals."""
         for entry in symbols:
             symbol = entry["symbol"]
             asset_type = entry["asset_type"]
             try:
                 for interval in MAIN_INTERVALS:
-                    await self._fetch_main_interval(symbol, interval, asset_type)
+                    await self._tail_fill(symbol, interval, asset_type)
 
                 for target_interval, (src_interval, factor) in DERIVED_MAP.items():
                     await self._aggregate_derived(
@@ -199,62 +226,84 @@ class KlineScheduler:
                     "KlineScheduler: failed symbol %s (%s)", symbol, asset_type,
                 )
 
-    # ── API fetch + persist ───────────────────────────────────────────────
+    # ── Deep cycle ────────────────────────────────────────────────────────
 
-    async def _fetch_main_interval(
+    async def _process_deep_cycle(self, symbols: list[dict[str, str]]) -> None:
+        """Full-history backfill for new symbols, early-gap backfill, internal
+        gap scan, and auto-correct."""
+        for entry in symbols:
+            symbol = entry["symbol"]
+            asset_type = entry["asset_type"]
+            try:
+                for interval in MAIN_INTERVALS:
+                    if self._is_alphavantage(symbol, asset_type):
+                        continue
+
+                    # Full backfill if DB still empty (newly added symbol).
+                    step = _bar_interval_seconds(interval)
+                    if not step:
+                        continue
+                    newest, earliest = self._query_db_range(
+                        symbol, asset_type, interval,
+                    )
+                    if newest is None:
+                        await self._full_backfill(symbol, interval, asset_type)
+                        continue
+
+                    # Early-gap backfill: walk backwards from earliest DB candle.
+                    # Only for crypto (Binance supports end_time-bounded queries).
+                    if asset_type != "stock":
+                        await self._backfill_early_gap(
+                            symbol, interval, asset_type, step, earliest,
+                        )
+
+                # Internal gap scan (crypto only).
+                if asset_type != "stock":
+                    for interval in MAIN_INTERVALS:
+                        await self._scan_and_fill_internal_gaps(
+                            symbol, interval, asset_type,
+                        )
+
+                # Auto-correct recent candles.
+                for interval in MAIN_INTERVALS:
+                    await self._auto_correct(symbol, interval, asset_type)
+
+            except Exception:
+                logger.exception(
+                    "KlineScheduler: deep cycle failed for %s (%s)",
+                    symbol, asset_type,
+                )
+
+    # ── Tail fill (fast cycle) ────────────────────────────────────────────
+
+    async def _tail_fill(
         self, symbol: str, interval: str, asset_type: str,
     ) -> None:
+        """Fetch and persist only the missing candles between newest DB and now."""
         step = _bar_interval_seconds(interval)
         if not step:
             return
 
-        # Skip Alpha Vantage symbols — 25 req/day is too low for bulk backfill.
         if self._is_alphavantage(symbol, asset_type):
-            logger.debug(
-                "KlineScheduler: skipping Alpha Vantage symbol %s (%s)",
-                symbol, asset_type,
-            )
             return
 
-        # Check the newest candle already in DB.
-        db = SessionLocal()
-        try:
-            upsert_symbol(db, infer_symbol_row(symbol, asset_type))
-            sym = db.query(Symbol).filter(
-                Symbol.symbol == symbol, Symbol.asset_type == asset_type,
-            ).first()
-            if not sym:
-                return
-            sym_id = sym.id
-            newest_row = (
-                db.query(Kline.open_time)
-                .filter(
-                    Kline.symbol_id == sym_id,
-                    Kline.bar_interval == interval,
-                )
-                .order_by(Kline.open_time.desc())
-                .first()
-            )
-            newest_db_t = int(newest_row[0]) if newest_row else None
-        finally:
-            db.close()
+        newest_db_t, _ = self._query_db_range(symbol, asset_type, interval)
 
         now = int(time.time())
-        latest_closed = (now // step) * step - step  # last fully-closed bar's open_time
+        latest_closed = (now // step) * step - step
 
         if newest_db_t is None:
-            # Full backfill — first time seeing this symbol + interval.
+            # DB empty — full backfill (handled in deep cycle, but do a quick
+            # tail fill here so the fast cycle has data to work with).
             logger.info(
-                "KlineScheduler: full backfill %s %s @ %s",
+                "KlineScheduler: quick tail fill %s %s @ %s (DB empty)",
                 symbol, asset_type, interval,
             )
             await self._throttle(symbol, asset_type)
             klines = await fetch_klines_from_api(
-                symbol, asset_type, interval,
-                limit=self.INITIAL_BACKFILL_LIMIT,
+                symbol, asset_type, interval, limit=self.TAIL_FETCH_LIMIT,
             )
         elif newest_db_t < latest_closed:
-            # Tail fill — only fetch missing bars.
             missing = (latest_closed - newest_db_t) // step
             fetch_n = min(
                 max(missing + 10, self.TAIL_FETCH_LIMIT // 2),
@@ -267,8 +316,6 @@ class KlineScheduler:
             await self._throttle(symbol, asset_type)
 
             if use_stock_kline_api(symbol, asset_type):
-                # yfinance has no start_time/end_time — fetch latest N and
-                # filter to only bars newer than what's in DB.
                 klines = await fetch_klines_from_api(
                     symbol, asset_type, interval, limit=fetch_n,
                 )
@@ -277,38 +324,298 @@ class KlineScheduler:
                     if _to_unix_seconds(k["time"]) > newest_db_t
                 ]
             else:
-                # Binance supports time-bounded fetch for precise gap fill.
                 klines = await fetch_klines_from_api(
                     symbol, asset_type, interval, limit=fetch_n,
                     start_time=newest_db_t + step,
                     end_time=latest_closed + step,
                 )
         else:
-            return  # up to date
+            return
 
         if not klines:
             return
 
-        # Persist.
+        self._persist_klines(symbol, asset_type, interval, klines)
+
+    # ── Full-history backfill (deep cycle, empty DB) ──────────────────────
+
+    async def _full_backfill(
+        self, symbol: str, interval: str, asset_type: str,
+    ) -> None:
+        """Walk backwards through all available API data to fill an empty DB."""
+        backfill_limit = (
+            self.BACKFILL_LIMIT_1M if interval == "1m" else self.BACKFILL_LIMIT
+        )
+        logger.info(
+            "KlineScheduler: full backfill %s %s @ %s (limit=%d)",
+            symbol, asset_type, interval, backfill_limit,
+        )
+        await self._throttle(symbol, asset_type)
+        klines = await fetch_klines_from_api(
+            symbol, asset_type, interval, limit=backfill_limit,
+        )
+        if klines:
+            self._persist_klines(symbol, asset_type, interval, klines)
+
+    # ── Early-gap backfill (deep cycle, crypto only) ──────────────────────
+
+    async def _backfill_early_gap(
+        self, symbol: str, interval: str, asset_type: str,
+        step: int, earliest_db_t: int | None,
+    ) -> None:
+        """Walk backwards from the earliest DB candle to fill pre-DB history.
+
+        Only for crypto (Binance supports end_time-bounded queries).
+        Walks in chunks of 1000 until the API returns empty (beginning of data).
+        """
+        if earliest_db_t is None:
+            return
+
+        cursor_end = earliest_db_t - step
+        total_fetched = 0
+        max_early = self.BACKFILL_LIMIT  # cap to avoid infinite loops
+
+        while cursor_end > 0 and total_fetched < max_early:
+            logger.info(
+                "KlineScheduler: early backfill %s %s @ %s (end_time=%d)",
+                symbol, asset_type, interval, cursor_end,
+            )
+            await self._throttle(symbol, asset_type)
+            klines = await fetch_klines_from_api(
+                symbol, asset_type, interval,
+                limit=1000, end_time=cursor_end,
+            )
+            if not klines:
+                break  # reached beginning of available data
+
+            self._persist_klines(symbol, asset_type, interval, klines)
+            total_fetched += len(klines)
+
+            # Move cursor to before the oldest candle in this batch.
+            times = [int(k["time"]) for k in klines]
+            cursor_end = min(times) - step
+
+        if total_fetched:
+            logger.info(
+                "KlineScheduler: early backfill complete %s %s @ %s (saved=%d)",
+                symbol, asset_type, interval, total_fetched,
+            )
+
+    # ── Internal gap scan (deep cycle, crypto only) ───────────────────────
+
+    async def _scan_and_fill_internal_gaps(
+        self, symbol: str, interval: str, asset_type: str,
+    ) -> None:
+        """Scan DB for missing sequences and fill them via time-bounded API fetches.
+
+        Reuses the segmented scan algorithm from seed_candles.py.
+        Only for crypto (Binance supports start_time/end_time).
+        """
+        step = _bar_interval_seconds(interval)
+        if not step:
+            return
+
         db = SessionLocal()
         try:
             upsert_symbol(db, infer_symbol_row(symbol, asset_type))
             sym = db.query(Symbol).filter(
                 Symbol.symbol == symbol, Symbol.asset_type == asset_type,
             ).first()
-            if sym:
-                saved = save_klines(db, sym.id, interval, klines)
-                logger.info(
-                    "KlineScheduler: saved %d candles for %s %s @ %s",
-                    saved, symbol, asset_type, interval,
-                )
-        except Exception:
-            logger.exception(
-                "KlineScheduler: persist failed for %s %s @ %s",
-                symbol, asset_type, interval,
-            )
+            if not sym:
+                return
+            sym_id = sym.id
         finally:
             db.close()
+
+        # Segmented scan for gaps.
+        gaps = self._scan_gaps_sync(sym_id, interval, step)
+        if not gaps:
+            return
+
+        logger.info(
+            "KlineScheduler: internal gap scan %s %s @ %s: %d gap(s)",
+            symbol, asset_type, interval, len(gaps),
+        )
+
+        for left_t, right_t, missing in gaps:
+            miss_start = left_t + step
+            miss_end = right_t - step
+            if miss_start > miss_end:
+                continue
+
+            fetch_n = min(max(missing + 20, 100), 10_000)
+            logger.info(
+                "KlineScheduler: filling gap %s %s @ %s "
+                "(%d bars missing, span=%d..%d, fetch=%d)",
+                symbol, asset_type, interval, missing, miss_start, miss_end, fetch_n,
+            )
+            await self._throttle(symbol, asset_type)
+            klines = await fetch_klines_from_api(
+                symbol, asset_type, interval, limit=fetch_n,
+                start_time=miss_start, end_time=miss_end,
+            )
+            if klines:
+                self._persist_klines(symbol, asset_type, interval, klines)
+
+    def _scan_gaps_sync(
+        self, symbol_id: int, interval: str, step: int,
+    ) -> list[tuple[int, int, int]]:
+        """Segmented DB scan for gaps in ascending open_time order.
+
+        Returns list of (left_open_time, right_open_time, missing_count).
+        """
+        gaps: list[tuple[int, int, int]] = []
+        db = SessionLocal()
+        try:
+            cursor_after: int | None = None
+            while True:
+                q = (
+                    db.query(Kline.open_time)
+                    .filter(
+                        Kline.symbol_id == symbol_id,
+                        Kline.bar_interval == interval,
+                    )
+                    .order_by(Kline.open_time.asc())
+                )
+                if cursor_after is not None:
+                    q = q.filter(Kline.open_time > cursor_after)
+                q = q.limit(self.SCAN_WINDOW)
+                rows = q.all()
+                if not rows:
+                    break
+
+                times = [int(r[0]) for r in rows]
+                prev_t = times[0]
+                for t in times[1:]:
+                    delta = t - prev_t
+                    if delta > step:
+                        missing = (delta // step) - 1
+                        gaps.append((prev_t, t, missing))
+                    prev_t = t
+
+                cursor_after = times[-1]
+                if len(times) < self.SCAN_WINDOW:
+                    break
+        finally:
+            db.close()
+        return gaps
+
+    # ── Auto-correct (deep cycle) ─────────────────────────────────────────
+
+    async def _auto_correct(
+        self, symbol: str, interval: str, asset_type: str,
+    ) -> None:
+        """Compare recent DB candles against API and fix mismatches.
+
+        Reuses the algorithm from seed_candles.py correct_recent_candles().
+        """
+        step = _bar_interval_seconds(interval)
+        if not step:
+            return
+
+        if self.CORRECTION_LIMIT <= 0:
+            return
+
+        # Determine end time.
+        now = int(time.time())
+        if asset_type == "stock":
+            end_t = now  # stock auto-correct uses wall-clock; seed_candles probes API
+        else:
+            end_t = (now // step) * step - step  # latest closed
+
+        await self._throttle(symbol, asset_type)
+        api = await fetch_klines_from_api(
+            symbol, asset_type, interval,
+            limit=self.CORRECTION_LIMIT, end_time=end_t,
+        )
+        if not api:
+            return
+
+        min_t = min(int(k["time"]) for k in api)
+        max_t = max(int(k["time"]) for k in api)
+        api_times = {int(k["time"]) for k in api}
+
+        db = SessionLocal()
+        try:
+            upsert_symbol(db, infer_symbol_row(symbol, asset_type))
+            sym = db.query(Symbol).filter(
+                Symbol.symbol == symbol, Symbol.asset_type == asset_type,
+            ).first()
+            if not sym:
+                return
+            sid = sym.id
+
+            rows = (
+                db.query(Kline)
+                .filter(
+                    Kline.symbol_id == sid,
+                    Kline.bar_interval == interval,
+                    Kline.open_time >= min_t,
+                    Kline.open_time <= max_t,
+                )
+                .all()
+            )
+            by_t = {int(r.open_time): r for r in rows}
+
+            to_save: list[dict[str, Any]] = []
+            for k in api:
+                t = int(k["time"])
+                if t > end_t:
+                    continue
+                row = by_t.get(t)
+                if row is None:
+                    to_save.append(k)
+                elif self._row_differs(row, k):
+                    to_save.append(k)
+
+            if to_save:
+                saved = save_klines(db, sid, interval, to_save)
+                logger.info(
+                    "KlineScheduler: corrected %d candles for %s %s @ %s",
+                    saved, symbol, asset_type, interval,
+                )
+
+            # Stock cleanup: prune zero-volume rows not in API set.
+            if asset_type == "stock" and to_save:
+                prune_end = max_t + (step * 2 if step else 0)
+                extra = (
+                    db.query(Kline)
+                    .filter(
+                        Kline.symbol_id == sid,
+                        Kline.bar_interval == interval,
+                        Kline.open_time >= min_t,
+                        Kline.open_time <= prune_end,
+                    )
+                    .all()
+                )
+                prune_ids = [
+                    int(r.id) for r in extra
+                    if int(r.open_time) not in api_times and float(r.base_volume) <= 0
+                ]
+                if prune_ids:
+                    db.query(Kline).filter(Kline.id.in_(prune_ids)).delete(
+                        synchronize_session=False,
+                    )
+                    db.commit()
+                    logger.info(
+                        "KlineScheduler: stock prune %s %s @ %s: deleted=%d",
+                        symbol, asset_type, interval, len(prune_ids),
+                    )
+        finally:
+            db.close()
+
+    @staticmethod
+    def _row_differs(row: Kline, api: dict[str, Any], eps: float = 1e-12) -> bool:
+        return any(
+            abs(float(a) - float(b)) > eps
+            for a, b in (
+                (row.open_price, api["open"]),
+                (row.high_price, api["high"]),
+                (row.low_price, api["low"]),
+                (row.close_price, api["close"]),
+                (row.base_volume, api["volume"]),
+            )
+        )
 
     # ── Aggregation ───────────────────────────────────────────────────────
 
@@ -383,7 +690,7 @@ class KlineScheduler:
         for i in range(0, len(candles), factor):
             group = candles[i : i + factor]
             if len(group) < factor:
-                continue  # incomplete final group — skip
+                continue
             result.append({
                 "time": group[0]["time"],
                 "open": group[0]["open"],
@@ -417,6 +724,65 @@ class KlineScheduler:
                 "volume": sum(c["volume"] for c in group),
             })
         return result
+
+    # ── DB helpers ────────────────────────────────────────────────────────
+
+    def _query_db_range(
+        self, symbol: str, asset_type: str, interval: str,
+    ) -> tuple[int | None, int | None]:
+        """Return (newest_open_time, earliest_open_time) for a symbol+interval."""
+        db = SessionLocal()
+        try:
+            upsert_symbol(db, infer_symbol_row(symbol, asset_type))
+            sym = db.query(Symbol).filter(
+                Symbol.symbol == symbol, Symbol.asset_type == asset_type,
+            ).first()
+            if not sym:
+                return None, None
+
+            newest = (
+                db.query(Kline.open_time)
+                .filter(Kline.symbol_id == sym.id, Kline.bar_interval == interval)
+                .order_by(Kline.open_time.desc())
+                .first()
+            )
+            earliest = (
+                db.query(Kline.open_time)
+                .filter(Kline.symbol_id == sym.id, Kline.bar_interval == interval)
+                .order_by(Kline.open_time.asc())
+                .first()
+            )
+            return (
+                int(newest[0]) if newest else None,
+                int(earliest[0]) if earliest else None,
+            )
+        finally:
+            db.close()
+
+    def _persist_klines(
+        self, symbol: str, asset_type: str, interval: str,
+        klines: list[dict],
+    ) -> None:
+        """Upsert klines and log result."""
+        db = SessionLocal()
+        try:
+            upsert_symbol(db, infer_symbol_row(symbol, asset_type))
+            sym = db.query(Symbol).filter(
+                Symbol.symbol == symbol, Symbol.asset_type == asset_type,
+            ).first()
+            if sym:
+                saved = save_klines(db, sym.id, interval, klines)
+                logger.info(
+                    "KlineScheduler: saved %d candles for %s %s @ %s",
+                    saved, symbol, asset_type, interval,
+                )
+        except Exception:
+            logger.exception(
+                "KlineScheduler: persist failed for %s %s @ %s",
+                symbol, asset_type, interval,
+            )
+        finally:
+            db.close()
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
