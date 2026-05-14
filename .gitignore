@@ -17,6 +17,8 @@ docs/
 
 # Env files
 .env
+.env.bak
+
 
 # Frontend env files
 frontend/.env*
