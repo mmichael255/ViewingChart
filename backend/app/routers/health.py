@@ -14,7 +14,7 @@ _start_time = time.time()
 
 
 @router.get("/health")
-async def health_check(_=Depends(require_superadmin)):
+async def health_check():
     """
     Health check endpoint — verifies critical dependencies.
     Returns 200 if healthy, 503 if any critical dependency is down.
