@@ -93,3 +93,11 @@ curl http://localhost:8000/metrics  # Prometheus metrics
 - All config from root `.env`, loaded in `backend/app/config.py`
 - JWT tokens expire in 7 days; auto-creates default watchlist on registration
 - Two user roles: `user` and `superadmin` (superadmin required for monitor dashboard)
+
+## Deployment
+
+- Development work happens on the `dev` branch
+- Changes are merged to `main` and pushed to origin
+- The production server mirrors `main` — it pulls and restarts containers
+- Server runs via `docker compose` with `.env` for configuration
+- Backend entrypoint runs `alembic upgrade head` on each restart
