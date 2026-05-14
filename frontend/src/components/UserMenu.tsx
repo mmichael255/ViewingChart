@@ -20,10 +20,14 @@ export function UserMenu() {
   const router = useRouter();
   const ref = useRef<HTMLDivElement>(null);
 
-  const [token, setToken] = useState<string | null>(() => getAccessToken());
+  const [token, setToken] = useState<string | null>(null);
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
   const [authMode, setAuthMode] = useState<"closed" | "login" | "register">("closed");
+
+  useEffect(() => {
+    setToken(getAccessToken());
+  }, []);
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
