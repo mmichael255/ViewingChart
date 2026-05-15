@@ -17,6 +17,7 @@ import os
 import time
 from collections import deque
 from datetime import datetime, timezone
+from logging.handlers import TimedRotatingFileHandler
 from typing import Any
 
 from app.database.connection import SessionLocal
@@ -33,6 +34,20 @@ from app.services.klines_db_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── File output with daily rotation ─────────────────────────────────────
+_log_path = os.getenv("KLINE_SCHEDULER_LOG_PATH", "logs/scheduler.log")
+_log_dir = os.path.dirname(_log_path)
+if _log_dir:
+    os.makedirs(_log_dir, exist_ok=True)
+_file_handler = TimedRotatingFileHandler(
+    _log_path, when="midnight", interval=1, backupCount=30,
+)
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s │ %(levelname)-7s │ %(name)-30s │ %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+logger.addHandler(_file_handler)
 
 # ── Intervals fetched from API ────────────────────────────────────────────
 MAIN_INTERVALS = ("1m", "15m", "1h", "4h", "1d")
@@ -213,6 +228,9 @@ class KlineScheduler:
         for entry in symbols:
             symbol = entry["symbol"]
             asset_type = entry["asset_type"]
+            logger.info(
+                "KlineScheduler: fast cycle %s %s — start", symbol, asset_type,
+            )
             try:
                 for interval in MAIN_INTERVALS:
                     await self._tail_fill(symbol, interval, asset_type)
@@ -225,6 +243,9 @@ class KlineScheduler:
                 logger.exception(
                     "KlineScheduler: failed symbol %s (%s)", symbol, asset_type,
                 )
+            logger.info(
+                "KlineScheduler: fast cycle %s %s — done", symbol, asset_type,
+            )
 
     # ── Deep cycle ────────────────────────────────────────────────────────
 
@@ -234,6 +255,9 @@ class KlineScheduler:
         for entry in symbols:
             symbol = entry["symbol"]
             asset_type = entry["asset_type"]
+            logger.info(
+                "KlineScheduler: deep cycle %s %s — start", symbol, asset_type,
+            )
             try:
                 for interval in MAIN_INTERVALS:
                     if self._is_alphavantage(symbol, asset_type):
@@ -273,6 +297,9 @@ class KlineScheduler:
                     "KlineScheduler: deep cycle failed for %s (%s)",
                     symbol, asset_type,
                 )
+            logger.info(
+                "KlineScheduler: deep cycle %s %s — done", symbol, asset_type,
+            )
 
     # ── Tail fill (fast cycle) ────────────────────────────────────────────
 
@@ -330,9 +357,17 @@ class KlineScheduler:
                     end_time=latest_closed + step,
                 )
         else:
+            logger.info(
+                "KlineScheduler: tail fill %s %s @ %s — no gap, DB is current",
+                symbol, asset_type, interval,
+            )
             return
 
         if not klines:
+            logger.info(
+                "KlineScheduler: tail fill %s %s @ %s — API returned 0 klines",
+                symbol, asset_type, interval,
+            )
             return
 
         self._persist_klines(symbol, asset_type, interval, klines)
@@ -356,6 +391,11 @@ class KlineScheduler:
         )
         if klines:
             self._persist_klines(symbol, asset_type, interval, klines)
+        else:
+            logger.info(
+                "KlineScheduler: full backfill %s %s @ %s — API returned 0 klines",
+                symbol, asset_type, interval,
+            )
 
     # ── Early-gap backfill (deep cycle, crypto only) ──────────────────────
 
@@ -386,7 +426,11 @@ class KlineScheduler:
                 limit=1000, end_time=cursor_end,
             )
             if not klines:
-                break  # reached beginning of available data
+                logger.info(
+                    "KlineScheduler: early backfill %s %s @ %s — reached beginning of data",
+                    symbol, asset_type, interval,
+                )
+                break
 
             self._persist_klines(symbol, asset_type, interval, klines)
             total_fetched += len(klines)
@@ -395,11 +439,10 @@ class KlineScheduler:
             times = [int(k["time"]) for k in klines]
             cursor_end = min(times) - step
 
-        if total_fetched:
-            logger.info(
-                "KlineScheduler: early backfill complete %s %s @ %s (saved=%d)",
-                symbol, asset_type, interval, total_fetched,
-            )
+        logger.info(
+            "KlineScheduler: early backfill complete %s %s @ %s (saved=%d)",
+            symbol, asset_type, interval, total_fetched,
+        )
 
     # ── Internal gap scan (deep cycle, crypto only) ───────────────────────
 
@@ -430,6 +473,10 @@ class KlineScheduler:
         # Segmented scan for gaps.
         gaps = self._scan_gaps_sync(sym_id, interval, step)
         if not gaps:
+            logger.info(
+                "KlineScheduler: internal gap scan %s %s @ %s — no gaps found",
+                symbol, asset_type, interval,
+            )
             return
 
         logger.info(
@@ -529,6 +576,10 @@ class KlineScheduler:
             limit=self.CORRECTION_LIMIT, end_time=end_t,
         )
         if not api:
+            logger.info(
+                "KlineScheduler: auto-correct %s %s @ %s — API returned 0 klines",
+                symbol, asset_type, interval,
+            )
             return
 
         min_t = min(int(k["time"]) for k in api)
@@ -573,6 +624,11 @@ class KlineScheduler:
                 logger.info(
                     "KlineScheduler: corrected %d candles for %s %s @ %s",
                     saved, symbol, asset_type, interval,
+                )
+            else:
+                logger.info(
+                    "KlineScheduler: auto-correct %s %s @ %s — no corrections needed",
+                    symbol, asset_type, interval,
                 )
 
             # Stock cleanup: prune zero-volume rows not in API set.
@@ -633,6 +689,10 @@ class KlineScheduler:
                 db, symbol, asset_type, source_interval, limit=2000,
             )
             if not source_bars:
+                logger.info(
+                    "KlineScheduler: derived %s %s %s → %s — no source bars, skipping",
+                    symbol, asset_type, source_interval, target_interval,
+                )
                 return
 
             upsert_symbol(db, infer_symbol_row(symbol, asset_type))
@@ -663,6 +723,10 @@ class KlineScheduler:
 
         new_bars = [b for b in derived_bars if b["time"] > newest_derived_t]
         if not new_bars:
+            logger.info(
+                "KlineScheduler: derived %s %s %s → %s — already current, no new bars",
+                symbol, asset_type, source_interval, target_interval,
+            )
             return
 
         logger.info(

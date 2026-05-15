@@ -1,6 +1,7 @@
+import os
 import time
 import logging
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from app.config import get_redis, settings
 from app.services.stock_service import stock_service
 from app.services.websocket_manager import manager
@@ -56,3 +57,31 @@ async def ws_status(_=Depends(require_superadmin)):
     status["stock_quote_metrics"] = stock_metrics
     status["stock_regular_only_mode"] = stock_metrics.get("regular_only_mode_enabled", False)
     return status
+
+
+@router.get("/scheduler/log")
+async def scheduler_log(
+    lines: int = Query(100, ge=1, le=1000),
+    date: str | None = Query(None, description="Date in YYYY-MM-DD format for historical logs"),
+    _=Depends(require_superadmin),
+):
+    """Return the last N lines from the kline scheduler log file.
+
+    By default reads today's active log file. Pass ?date=YYYY-MM-DD to
+    read a rotated log from a specific day (e.g. scheduler.log.2026-05-14).
+    """
+    base_path = os.getenv("KLINE_SCHEDULER_LOG_PATH", "logs/scheduler.log")
+    log_path = f"{base_path}.{date}" if date else base_path
+    if not os.path.isfile(log_path):
+        raise HTTPException(status_code=404, detail="Scheduler log file not found")
+    try:
+        with open(log_path, "r") as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:]
+        return {
+            "path": log_path,
+            "lines": [l.rstrip("\n") for l in tail],
+            "total_lines": len(all_lines),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read log: {e}")
