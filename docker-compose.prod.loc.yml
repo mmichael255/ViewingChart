@@ -1,0 +1,72 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: viewingchart-mariadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-test123}
+      MYSQL_DATABASE: ${DB_NAME:-viewingchart}
+      MYSQL_USER: ${DB_USER:-testuser1}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-test123}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: viewingchart-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    image: ghcr.io/mmichael255/viewingchart/backend:main
+    pull_policy: always
+    container_name: viewingchart-backend
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      DB_HOST: mariadb
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: ghcr.io/mmichael255/viewingchart/web:main
+    pull_policy: always
+    container_name: viewingchart-nginx
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-8080}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  mariadb_data:

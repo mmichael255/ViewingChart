@@ -221,8 +221,12 @@ export default function Home() {
     };
   }, [assetType, symbol, watchlistTicker, extraTickerBySymbol]);
 
-  const token = typeof window !== 'undefined' ? getAccessToken() : null;
+  const [token, setToken] = useState<string | null>(null);
   const [me, setMe] = useState<{ role?: string | null } | null>(null);
+
+  useEffect(() => {
+    setToken(getAccessToken());
+  }, []);
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */

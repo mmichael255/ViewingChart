@@ -48,6 +48,9 @@ export default function MonitorPage() {
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [showRaw, setShowRaw] = useState(false);
   const [authBlocked, setAuthBlocked] = useState(false);
+  const [schedulerLog, setSchedulerLog] = useState<string[] | null>(null);
+  const [schedulerLogError, setSchedulerLogError] = useState<string | null>(null);
+  const [logDate, setLogDate] = useState(() => new Date().toISOString().slice(0, 10));
 
   const fetchAll = useCallback(async () => {
     try {
@@ -59,11 +62,15 @@ export default function MonitorPage() {
       }
 
       const headers = { Authorization: `Bearer ${token}` };
-      const [hRes, wRes] = await Promise.all([
+      const logUrl = logDate === new Date().toISOString().slice(0, 10)
+        ? `${API_URL}/scheduler/log?lines=100`
+        : `${API_URL}/scheduler/log?lines=100&date=${logDate}`;
+      const [hRes, wRes, sRes] = await Promise.all([
         fetch(`${API_URL}/health`, { headers }),
         fetch(`${API_URL}/ws/status`, { headers }),
+        fetch(logUrl, { headers }),
       ]);
-      if (hRes.status === 401 || hRes.status === 403 || wRes.status === 401 || wRes.status === 403) {
+      if (hRes.status === 401 || hRes.status === 403 || wRes.status === 401 || wRes.status === 403 || sRes.status === 401 || sRes.status === 403) {
         setAuthBlocked(true);
         throw new Error("没有权限访问（需要超级管理员）。");
       }
@@ -73,19 +80,32 @@ export default function MonitorPage() {
       const w = (await wRes.json()) as WsStatusPayload;
       setHealth(h);
       setWsStatus(w);
+      if (sRes.ok) {
+        const s = (await sRes.json()) as { lines: string[] };
+        setSchedulerLog(s.lines);
+        setSchedulerLogError(null);
+      } else if (sRes.status === 404) {
+        setSchedulerLog(null);
+        setSchedulerLogError("Log file not available yet");
+      } else {
+        setSchedulerLog(null);
+        setSchedulerLogError(`HTTP ${sRes.status}`);
+      }
       setError(null);
       setLastUpdated(Date.now());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [logDate]);
 
   useEffect(() => {
     void fetchAll();
     if (authBlocked) return;
+    const isToday = logDate === new Date().toISOString().slice(0, 10);
+    if (!isToday) return;
     const id = setInterval(() => void fetchAll(), POLL_MS);
     return () => clearInterval(id);
-  }, [fetchAll, authBlocked]);
+  }, [fetchAll, authBlocked, logDate]);
 
   const redisOk = health?.checks?.redis === "ok";
   const spotOk = health?.checks?.binance_spot_ws === "ok";
@@ -294,6 +314,38 @@ export default function MonitorPage() {
           <p className="text-xs text-gray-500">
             Scrape endpoint for Grafana. Restrict to internal networks in production.
           </p>
+        </section>
+
+        <section className="rounded-lg border border-gray-800 bg-[#1E222D] p-4 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
+              Scheduler Log
+            </h2>
+            <div className="flex items-center gap-3">
+              <input
+                type="date"
+                value={logDate}
+                onChange={(e) => setLogDate(e.target.value)}
+                className="text-xs bg-[#131722] border border-gray-700 rounded px-2 py-1 text-gray-300 font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => void fetchAll()}
+                className="text-xs text-[#2962FF] hover:underline"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+          {schedulerLogError ? (
+            <p className="text-xs text-gray-500">{schedulerLogError}</p>
+          ) : schedulerLog && schedulerLog.length > 0 ? (
+            <pre className="text-xs font-mono text-gray-300 overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words bg-[#131722] p-3 rounded border border-gray-800 max-h-96">
+              {schedulerLog.join("\n")}
+            </pre>
+          ) : (
+            <p className="text-xs text-gray-500">No log entries yet.</p>
+          )}
         </section>
 
         <section className="rounded-lg border border-gray-800 bg-[#1E222D] p-4">
