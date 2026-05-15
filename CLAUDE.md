@@ -128,6 +128,10 @@ curl http://localhost:8000/metrics  # Prometheus metrics
 
 When adding a new environment variable to the codebase, add it to `.env.example` (root) and document it in the env vars table above.
 
+## Debugging
+
+See `docs/debug-guide.md` for the debugging workflow.
+
 ## Deployment
 
 - Development work happens on the `dev` branch

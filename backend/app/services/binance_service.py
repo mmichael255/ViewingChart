@@ -257,12 +257,8 @@ class BinanceService:
 
         try:
             # Time-bounded mode: walk forward from start_time to end_time.
-            if start_time is not None or end_time is not None:
-                if start_time is None:
-                    now_ms = int(time.time() * 1000)
-                    start_ms = max(0, now_ms - (max(limit, 1) * 60_000))
-                else:
-                    start_ms = int(start_time * 1000)
+            if start_time is not None:
+                start_ms = int(start_time * 1000)
                 end_ms = int(end_time * 1000) if end_time is not None else int(time.time() * 1000)
                 remaining = max(limit, 1)
                 cursor_ms = start_ms
@@ -291,8 +287,10 @@ class BinanceService:
                     cursor_ms = next_cursor
             else:
                 # ── Auto-paginate to bypass Binance's 1000-candle hard limit ──
-                remaining = limit
-                cursor_end_ms = None
+                # When end_time is provided (e.g. early-gap backfill), walk backward
+                # from that point. Otherwise walk backward from now.
+                remaining = max(limit, 1)
+                cursor_end_ms = int(end_time * 1000) if end_time is not None else None
                 while remaining > 0:
                     batch_limit = min(remaining, 1000)
                     params = {
