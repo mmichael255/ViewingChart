@@ -85,6 +85,12 @@ def list_watchlists(
         .order_by(Watchlist.is_default.desc(), Watchlist.id.asc())
         .all()
     )
+    if not wls:
+        wl = Watchlist(user_id=current_user.id, name="My Watchlist", is_default=True)
+        db.add(wl)
+        db.commit()
+        db.refresh(wl)
+        return [WatchlistResponse(id=wl.id, name=wl.name, is_default=True)]
     return [WatchlistResponse(id=w.id, name=w.name, is_default=bool(w.is_default)) for w in wls]
 
 
