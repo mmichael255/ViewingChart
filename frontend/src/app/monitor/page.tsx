@@ -125,7 +125,7 @@ export default function MonitorPage() {
           </div>
           <div className="flex items-center gap-4">
             <div className="flex flex-col items-end gap-1 text-sm">
-              <Link href="/" className="text-[#2962FF] hover:underline">
+              <Link href="/" className="text-[#D1D5DB] hover:underline">
                 ← Back to chart
               </Link>
               <span className="text-gray-500 text-xs font-mono">
@@ -306,7 +306,7 @@ export default function MonitorPage() {
               href={`${apiOrigin()}/metrics`}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs text-[#2962FF] hover:underline font-mono"
+              className="text-xs text-[#D1D5DB] hover:underline font-mono"
             >
               GET /metrics
             </a>
@@ -331,7 +331,7 @@ export default function MonitorPage() {
               <button
                 type="button"
                 onClick={() => void fetchAll()}
-                className="text-xs text-[#2962FF] hover:underline"
+                className="text-xs text-[#D1D5DB] hover:underline"
               >
                 Refresh
               </button>
@@ -352,7 +352,7 @@ export default function MonitorPage() {
           <button
             type="button"
             onClick={() => setShowRaw((v) => !v)}
-            className="text-sm text-[#2962FF] hover:underline mb-2"
+            className="text-sm text-[#D1D5DB] hover:underline mb-2"
           >
             {showRaw ? "Hide" : "Show"} raw JSON
           </button>

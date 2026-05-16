@@ -36,9 +36,9 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
     onDrawingSelectionChange,
     colors = {
         backgroundColor: '#1E222D',
-        lineColor: '#2962FF',
+        lineColor: '#D1D5DB',
         textColor: '#D9D9D9',
-        areaTopColor: '#2962FF',
+        areaTopColor: '#D1D5DB',
         areaBottomColor: 'rgba(41, 98, 255, 0.28)',
     }
 }) => {
@@ -214,8 +214,8 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
         const activeBoll = indicators.find(ind => ind.id === 'boll');
         const activeSar = indicators.find(ind => ind.id === 'sar');
 
-        const maColors = ['#2962FF', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'];
-        const emaColors = ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#2962FF', '#FF6D00', '#00C853'];
+        const maColors = ['#D1D5DB', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'];
+        const emaColors = ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#D1D5DB', '#FF6D00', '#00C853'];
 
         activeMAs.forEach((ma) => {
             const periods = Array.isArray(ma.params?.periods) ? ma.params.periods : [20];
@@ -395,6 +395,12 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                 drawingManagerRef.current.cancelDrawing();
             } else if (e.key === 'Delete' || e.key === 'Backspace') {
                 drawingManagerRef.current.removeSelected();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                drawingManagerRef.current.nudgeSelected(-1, 0);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                drawingManagerRef.current.nudgeSelected(1, 0);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
@@ -532,9 +538,9 @@ export const ChartComponent: React.FC<ChartComponentProps> = ({
                                 {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                                 {vals.map((v: any, i) => {
                                     const getLegendColor = (id: string, index: number) => {
-                                        if (id === 'ma') return ['#2962FF', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'][index % 10];
-                                        if (id === 'ema') return ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#2962FF', '#FF6D00', '#00C853'][index % 10];
-                                        if (id === 'boll') return ['#2962FF', '#FFFFFF', '#2962FF'][index % 3];
+                                        if (id === 'ma') return ['#D1D5DB', '#FF6D00', '#00C853', '#E91E63', '#9C27B0', '#00BCD4', '#FFEB3B', '#FF5722', '#3F51B5', '#8BC34A'][index % 10];
+                                        if (id === 'ema') return ['#FFD600', '#E91E63', '#9C27B0', '#00BCD4', '#FF5722', '#3F51B5', '#8BC34A', '#D1D5DB', '#FF6D00', '#00C853'][index % 10];
+                                        if (id === 'boll') return ['#D1D5DB', '#FFFFFF', '#D1D5DB'][index % 3];
                                         if (id === 'sar') return '#E91E63';
                                         return `hsl(${index * 60}, 80%, 70%)`;
                                     };

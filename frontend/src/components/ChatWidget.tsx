@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { MessageCircle, X, Send } from "lucide-react";
 import type { KlineData } from '@/types/market';
 import { API_URL } from '@/config';
@@ -12,12 +12,24 @@ interface Message {
   content: string;
 }
 
+export interface ChatWidgetHandle {
+  toggle: () => void;
+  open: () => void;
+  close: () => void;
+}
+
 interface ChatWidgetProps {
   chartData: KlineData[] | undefined;
 }
 
-export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
+export const ChatWidget = forwardRef<ChatWidgetHandle, ChatWidgetProps>(({ chartData }, ref) => {
   const [isOpen, setIsOpen] = useState(false);
+
+  useImperativeHandle(ref, () => ({
+    toggle: () => setIsOpen(v => !v),
+    open: () => setIsOpen(true),
+    close: () => setIsOpen(false),
+  }));
   const [messages, setMessages] = useState<Message[]>([
     { id: "1", role: "ai", content: "Hi! I'm your market assistant. Ask me anything about the current chart." }
   ]);
@@ -81,12 +93,12 @@ export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
       {/* Chat Window */}
       <div
         className={clsx(
-          "fixed bottom-24 right-6 w-96 h-[500px] bg-[#1E222D] border border-gray-700 rounded-lg shadow-2xl flex flex-col transition-all z-50",
+          "fixed bottom-24 right-6 w-96 h-[500px] bg-[#161B22] border border-[#21262D] rounded-lg shadow-2xl flex flex-col transition-all z-50",
           isOpen ? "opacity-100 scale-100" : "opacity-0 scale-95 pointer-events-none"
         )}
       >
         {/* Header */}
-        <div className="p-4 border-b border-gray-700 bg-[#2A2E39] rounded-t-lg">
+        <div className="p-4 border-b border-[#30363D] bg-[#1C2128] rounded-t-lg">
           <h3 className="font-semibold text-white">Market AI Assistant</h3>
         </div>
 
@@ -114,7 +126,7 @@ export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
         </div>
 
         {/* Input */}
-        <form onSubmit={handleSubmit} className="p-4 border-t border-gray-700 bg-[#2A2E39] flex gap-2 rounded-b-lg">
+        <form onSubmit={handleSubmit} className="p-4 border-t border-[#30363D] bg-[#1C2128] flex gap-2 rounded-b-lg">
           <input
             type="text"
             value={input}
@@ -133,4 +145,5 @@ export const ChatWidget: React.FC<ChatWidgetProps> = ({ chartData }) => {
       </div>
     </>
   );
-};
+});
+ChatWidget.displayName = 'ChatWidget';

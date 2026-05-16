@@ -75,7 +75,7 @@ export function AuthModal({
       aria-label={title}
     >
       <div
-        className="w-full max-w-sm border border-gray-800 bg-[#1E222D] rounded-xl p-6 shadow-2xl text-white"
+        className="w-full max-w-sm border border-[#30363D] bg-[#161B22] rounded-xl p-6 shadow-2xl text-[#E6EDF3]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
@@ -121,13 +121,13 @@ export function AuthModal({
 
         <form className="mt-5 space-y-3" onSubmit={onSubmit}>
           <div className="space-y-1">
-            <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest">
+            <label className="text-[11px] font-black text-[#8B949E] uppercase tracking-widest">
               Username
             </label>
             <input
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+              className="w-full bg-[#0D1117] border border-[#21262D] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB] text-[#E6EDF3]"
               placeholder="yourname"
               autoComplete="username"
             />
@@ -135,13 +135,13 @@ export function AuthModal({
 
           {mode === "register" && (
             <div className="space-y-1">
-              <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest">
+              <label className="text-[11px] font-black text-[#8B949E] uppercase tracking-widest">
                 Email (optional)
               </label>
               <input
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                className="w-full bg-[#0D1117] border border-[#21262D] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB] text-[#E6EDF3]"
                 placeholder="you@example.com"
                 autoComplete="email"
               />
@@ -149,7 +149,7 @@ export function AuthModal({
           )}
 
           <div className="space-y-1">
-            <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest">
+            <label className="text-[11px] font-black text-[#8B949E] uppercase tracking-widest">
               Password
             </label>
             <div className="relative">
@@ -157,7 +157,7 @@ export function AuthModal({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 type={showPassword ? "text" : "password"}
-                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 pr-10 text-sm outline-none focus:border-[#2962FF]"
+                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 pr-10 text-sm outline-none focus:border-[#D1D5DB] text-[#E6EDF3]"
                 placeholder={mode === "login" ? "••••••••" : "min 8 chars"}
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
               />
@@ -181,7 +181,7 @@ export function AuthModal({
 
           <button
             disabled={loading}
-            className="w-full bg-[#2962FF] hover:bg-[#1f4fe0] disabled:opacity-60 disabled:hover:bg-[#2962FF] transition-colors rounded-lg py-2 text-sm font-black tracking-wide"
+            className="w-full bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:opacity-60 disabled:hover:bg-[#1f6feb] transition-colors rounded-lg py-2 text-sm font-black tracking-wide"
           >
             {loading ? (mode === "login" ? "Signing in..." : "Creating...") : mode === "login" ? "Sign in" : "Create account"}
           </button>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { API_URL } from '@/config';
 
 interface SymbolSearchProps {
@@ -92,6 +92,8 @@ export function SymbolSearch({ onSelect, placeholder = "Search symbol...", class
     const [results, setResults] = useState<SearchResultItem[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [visibleCount, setVisibleCount] = useState(20);
+    const [highlightedIndex, setHighlightedIndex] = useState(-1);
+    const resultsContainerRef = useRef<HTMLDivElement>(null);
     const [popularData, setPopularData] = useState<{ crypto: SearchResultItem[], stock: SearchResultItem[] }>({
         crypto: POPULAR_CRYPTO,
         stock: POPULAR_STOCKS,
@@ -117,12 +119,14 @@ export function SymbolSearch({ onSelect, placeholder = "Search symbol...", class
         if (!query) {
             setResults(assetType === 'crypto' ? popularData.crypto : popularData.stock);
             setVisibleCount(20);
+            setHighlightedIndex(-1);
             setIsLoading(false);
             return;
         }
 
         const delayDebounceFn = setTimeout(async () => {
             setVisibleCount(20);
+            setHighlightedIndex(-1);
             setIsLoading(true);
             try {
                 const res = await fetch(`${API_URL}/market/search?query=${query}&asset_type=${assetType}&limit=50`);
@@ -149,29 +153,40 @@ export function SymbolSearch({ onSelect, placeholder = "Search symbol...", class
         }
     };
 
+    // Scroll highlighted item into view
+    useEffect(() => {
+        if (highlightedIndex < 0 || !resultsContainerRef.current) return;
+        const container = resultsContainerRef.current;
+        const items = container.children;
+        const el = items[highlightedIndex] as HTMLElement | undefined;
+        if (el) {
+            el.scrollIntoView({ block: 'nearest' });
+        }
+    }, [highlightedIndex]);
+
     return (
-        <div className={`relative flex flex-col h-full bg-[#1E222D] ${className}`}>
+        <div className={`relative flex flex-col h-full bg-[#161B22] ${className}`}>
 
             {/* Asset Type Tabs */}
-            <div className="flex border-b border-gray-800 p-2 gap-2 shrink-0">
+            <div className="flex border-b border-[#30363D] p-2 gap-2 shrink-0">
                 <button
-                    className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${assetType === 'crypto' ? 'bg-[#2962FF] text-white' : 'text-gray-400 hover:bg-gray-800'}`}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${assetType === 'crypto' ? 'bg-[#1f6feb] text-white shadow-sm' : 'text-[#8B949E] hover:bg-[#30363D]'}`}
                     onClick={() => setAssetType('crypto')}
                 >
                     Crypto
                 </button>
                 <button
-                    className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${assetType === 'stock' ? 'bg-[#2962FF] text-white' : 'text-gray-400 hover:bg-gray-800'}`}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${assetType === 'stock' ? 'bg-[#1f6feb] text-white shadow-sm' : 'text-[#8B949E] hover:bg-[#30363D]'}`}
                     onClick={() => setAssetType('stock')}
                 >
                     Stocks & FX
                 </button>
             </div>
 
-            <div className="relative shrink-0 p-4 border-b border-gray-800">
+            <div className="relative shrink-0 p-4 border-b border-[#30363D]">
                 {!hideIcon && (
                     <div className="absolute inset-y-0 left-0 pl-6 flex items-center pointer-events-none">
-                        <span className="text-gray-400 text-xs text-[#2962FF]">🔍</span>
+                        <span className="text-gray-400 text-xs text-[#D1D5DB]">🔍</span>
                     </div>
                 )}
                 <input
@@ -179,41 +194,72 @@ export function SymbolSearch({ onSelect, placeholder = "Search symbol...", class
                     value={query}
                     autoFocus={autoFocus}
                     onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.ctrlKey && e.key === ',') {
+                            e.preventDefault();
+                            setAssetType(prev => prev === 'crypto' ? 'stock' : 'crypto');
+                            setHighlightedIndex(-1);
+                            return;
+                        }
+                        if (e.key === 'ArrowDown') {
+                            e.preventDefault();
+                            setHighlightedIndex(prev => {
+                                const max = Math.min(visibleCount, results.length) - 1;
+                                const next = prev < max ? prev + 1 : 0;
+                                return next;
+                            });
+                            return;
+                        }
+                        if (e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            setHighlightedIndex(prev => {
+                                const max = Math.min(visibleCount, results.length) - 1;
+                                const next = prev > 0 ? prev - 1 : max;
+                                return next;
+                            });
+                            return;
+                        }
+                        if (e.key === 'Enter' && highlightedIndex >= 0 && highlightedIndex < results.length) {
+                            e.preventDefault();
+                            const item = results[highlightedIndex];
+                            onSelect(item.symbol, assetType, item.source);
+                        }
+                    }}
                     placeholder={placeholder}
-                    className={`w-full bg-[#131722] border border-gray-700 text-white focus:outline-none focus:border-[#2962FF] transition-colors placeholder-gray-500 pr-3 ${!hideIcon ? 'pl-8' : 'pl-4'} ${inputClassName || 'py-2 text-sm rounded'}`}
+                    className={`w-full bg-[#0D1117] border border-[#21262D] text-[#E6EDF3] focus:outline-none focus:border-[#D1D5DB] transition-colors placeholder-[#6E7681] pr-3 ${!hideIcon ? 'pl-8' : 'pl-4'} ${inputClassName || 'py-2 text-sm rounded'}`}
                 />
                 {isLoading && (
-                    <div className="absolute right-6 top-6 w-4 h-4 border-2 border-[#2962FF] border-t-transparent rounded-full animate-spin" />
+                    <div className="absolute right-6 top-6 w-4 h-4 border-2 border-[#D1D5DB] border-t-transparent rounded-full animate-spin" />
                 )}
             </div>
 
-            <div className="flex-1 overflow-y-auto w-full max-h-[400px]" onScroll={handleScroll}>
+            <div className="flex-1 overflow-y-auto w-full max-h-[400px]" onScroll={handleScroll} ref={resultsContainerRef}>
                 {results.length > 0 ? results.slice(0, visibleCount).map((item, i) => (
                     <button
                         key={i}
-                        className="w-full text-left px-4 py-3 border-b border-gray-800/50 hover:bg-[#2962FF]/10 text-sm transition-colors flex justify-between items-center group"
+                        className={`w-full text-left px-4 py-3 border-b border-[#30363D]/50 text-sm transition-colors flex justify-between items-center group ${i === highlightedIndex ? 'bg-[#D1D5DB]/20 border-l-2 border-l-[#D1D5DB]' : 'hover:bg-[#D1D5DB]/10 border-l-2 border-l-transparent'}`}
                         onClick={() => {
                             onSelect(item.symbol, assetType, item.source);
                             // Input clearing and closing happens via parent
                         }}
                     >
                         <div>
-                            <span className="text-white font-bold group-hover:text-[#2962FF] transition-colors">{item.symbol}</span>
-                            <span className="text-gray-500 text-[11px] ml-2 block sm:inline">
+                            <span className="text-[#E6EDF3] font-bold group-hover:text-[#D1D5DB] transition-colors">{item.symbol}</span>
+                            <span className="text-[#6E7681] text-[11px] ml-2 block sm:inline">
                                 {item.baseAsset ? `${item.baseAsset} / ${item.quoteAsset}` : item.name || item.type}
                             </span>
                             {item.source && (
-                                <span className="text-gray-500 text-[9px] ml-2 border border-gray-700 px-1 py-0.5 rounded bg-[#131722] uppercase tracking-wider">
+                                <span className="text-[#6E7681] text-[9px] ml-2 border border-[#21262D] px-1 py-0.5 rounded bg-[#0D1117] uppercase tracking-wider">
                                     {item.source}
                                 </span>
                             )}
                         </div>
                         {mode === 'add' && (
-                            <span className="text-gray-500 group-hover:text-[#2962FF] font-bold text-lg leading-none">+</span>
+                            <span className="text-[#6E7681] group-hover:text-[#D1D5DB] font-bold text-lg leading-none">+</span>
                         )}
                     </button>
                 )) : query && !isLoading ? (
-                    <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                    <div className="px-4 py-8 text-center text-[#6E7681] text-sm">
                         No results found for &quot;{query}&quot;
                     </div>
                 ) : null}

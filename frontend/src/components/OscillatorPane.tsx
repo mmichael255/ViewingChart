@@ -188,7 +188,7 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
                 newDefaultLegend['val_2'] = last.histogram;
             }
 
-            const macdSeries = chart.addSeries(LineSeries, { color: '#2962FF', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            const macdSeries = chart.addSeries(LineSeries, { color: '#D1D5DB', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
             const signalSeries = chart.addSeries(LineSeries, { color: '#FF6D00', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
             const histSeries = chart.addSeries(HistogramSeries, { lastValueVisible: false, priceLineVisible: false });
 
@@ -239,7 +239,7 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
             }
 
             const kSeries = chart.addSeries(LineSeries, { color: '#FFD600', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
-            const dSeries = chart.addSeries(LineSeries, { color: '#2962FF', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
+            const dSeries = chart.addSeries(LineSeries, { color: '#D1D5DB', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
             const jSeries = chart.addSeries(LineSeries, { color: '#E91E63', lineWidth: 1, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false });
 
             kSeries.setData(res.filter(d => !isNaN(d.k)).map(d => ({ time: d.time as Time, value: d.k })));
@@ -271,7 +271,7 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
         if (indicator.id === 'macd') {
             return (
                 <div className="flex gap-2">
-                    <span className="text-[#2962FF]">{typeof activeLegendData['val_0'] === 'number' ? activeLegendData['val_0'].toFixed(4) : ''}</span>
+                    <span className="text-[#D1D5DB]">{typeof activeLegendData['val_0'] === 'number' ? activeLegendData['val_0'].toFixed(4) : ''}</span>
                     <span className="text-[#FF6D00]">{typeof activeLegendData['val_1'] === 'number' ? activeLegendData['val_1'].toFixed(4) : ''}</span>
                     <span className={activeLegendData['val_2'] >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'}>{typeof activeLegendData['val_2'] === 'number' ? activeLegendData['val_2'].toFixed(4) : ''}</span>
                 </div>
@@ -284,7 +284,7 @@ export const OscillatorPane: React.FC<OscillatorPaneProps> = ({
             return (
                 <div className="flex gap-2">
                     <span className="text-[#FFD600]">{typeof activeLegendData['val_0'] === 'number' ? activeLegendData['val_0'].toFixed(2) : ''}</span>
-                    <span className="text-[#2962FF]">{typeof activeLegendData['val_1'] === 'number' ? activeLegendData['val_1'].toFixed(2) : ''}</span>
+                    <span className="text-[#D1D5DB]">{typeof activeLegendData['val_1'] === 'number' ? activeLegendData['val_1'].toFixed(2) : ''}</span>
                     <span className="text-[#E91E63]">{typeof activeLegendData['val_2'] === 'number' ? activeLegendData['val_2'].toFixed(2) : ''}</span>
                 </div>
             );

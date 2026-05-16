@@ -2,7 +2,8 @@
 
 import { ChartComponent } from '@/components/ChartComponent';
 import { PriceHighlight } from '@/components/Highlighting';
-import { IndicatorBar, IndicatorConfig } from '@/components/IndicatorBar';
+import { IndicatorBar, IndicatorConfig, type IndicatorBarHandle } from '@/components/IndicatorBar';
+import { ChatWidget, type ChatWidgetHandle } from '@/components/ChatWidget';
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
@@ -20,6 +21,10 @@ import type { WatchlistSummary } from '@/components/WatchlistSidebar';
 import type { WatchlistItem } from '@/types/market';
 import { UserMenu } from '@/components/UserMenu';
 import { formatCountdownMs, useCountdownMs } from '@/hooks/useCountdown';
+import { useResizable } from '@/hooks/useResizable';
+import { ResizeHandle } from '@/components/ResizeHandle';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { KeyboardShortcutsHelp } from '@/components/KeyboardShortcutsHelp';
 
 const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
@@ -103,6 +108,16 @@ export default function Home() {
   // Drawing Tools State
   const [activeTool, setActiveTool] = useState<DrawingToolType>('crosshair');
 
+  // Sidebar resize + collapse
+  const { size: sidebarWidth, isDragging: isSidebarDragging, handleProps: sidebarHandleProps } = useResizable({
+    initialSize: 320,
+    minSize: 200,
+    maxSize: 600,
+    direction: 'horizontal',
+  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+
   // Indicators State
   const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([
     { id: 'ma', type: 'overlay', name: 'MA', params: { periods: [7, 25, 99] } },
@@ -114,6 +129,8 @@ export default function Home() {
   const [quickIntervals, setQuickIntervals] = useState(['15m', '1h', '4h', '1d', '1w']);
   const [showAllIntervals, setShowAllIntervals] = useState(false);
   const intervalDropdownRef = useRef<HTMLDivElement>(null);
+  const indicatorBarRef = useRef<IndicatorBarHandle>(null);
+  const chatWidgetRef = useRef<ChatWidgetHandle>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -221,10 +238,10 @@ export default function Home() {
     };
   }, [assetType, symbol, watchlistTicker, extraTickerBySymbol]);
 
-  const [token, setToken] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(() => getAccessToken());
   const [me, setMe] = useState<{ role?: string | null } | null>(null);
 
-  useEffect(() => {
+  const handleAuthChange = useCallback(() => {
     setToken(getAccessToken());
   }, []);
 
@@ -301,10 +318,8 @@ export default function Home() {
     })();
   }, [token, selectedWatchlistId]);
 
-  async function createWatchlist() {
+  async function createWatchlist(name: string) {
     if (!token) return;
-    const name = window.prompt('New watchlist name?');
-    if (!name) return;
     const wl = await fetchJson<WatchlistSummary>('/watchlists', {
       method: 'POST',
       auth: true,
@@ -315,11 +330,8 @@ export default function Home() {
     setSelectedWatchlistId(wl.id);
   }
 
-  async function renameWatchlist() {
+  async function renameWatchlist(name: string) {
     if (!token || !selectedWatchlistId || !watchlists) return;
-    const cur = watchlists.find(w => w.id === selectedWatchlistId);
-    const name = window.prompt('Rename watchlist:', cur?.name ?? '');
-    if (!name) return;
     await fetchJson<WatchlistSummary>(`/watchlists/${selectedWatchlistId}`, {
       method: 'PATCH',
       auth: true,
@@ -331,7 +343,6 @@ export default function Home() {
 
   async function deleteWatchlist() {
     if (!token || !selectedWatchlistId) return;
-    if (!window.confirm('Delete this watchlist?')) return;
     await fetchJson<void>(`/watchlists/${selectedWatchlistId}`, { method: 'DELETE', auth: true });
     const wls = await fetchJson<WatchlistSummary[]>('/watchlists', { auth: true });
     setWatchlists(wls);
@@ -433,6 +444,17 @@ export default function Home() {
     }
   }, [lastClose, symbol]);
 
+  // Flat watchlist for keyboard cycling
+  const flatWatchlist = useMemo(() => {
+    if (orderedWatchlistItems && orderedWatchlistItems.length > 0) {
+      return orderedWatchlistItems.map(i => ({ sym: i.sym, type: i.asset_type }));
+    }
+    return [
+      ...cryptoWatchlist.map(i => ({ sym: i.sym, type: 'crypto' as const })),
+      ...stockWatchlist.map(i => ({ sym: i.sym, type: 'stock' as const })),
+    ];
+  }, [orderedWatchlistItems, cryptoWatchlist, stockWatchlist]);
+
   const handleSymbolChange = (newSymbol: string, type: string) => {
     setSymbol(newSymbol);
     setAssetType(type);
@@ -445,6 +467,53 @@ export default function Home() {
     setChartInterval(newInterval);
     setShowAllIntervals(false);
   };
+
+  // Global keyboard shortcuts
+  useKeyboardShortcuts({
+    'Escape': () => {
+      setSearchModalMode('closed');
+      setShowAllIntervals(false);
+      setShowShortcutsHelp(false);
+      setActiveTool('crosshair');
+      indicatorBarRef.current?.closeAll();
+    },
+    '/': () => setSearchModalMode('search'),
+    'Shift+/': () => setShowShortcutsHelp(v => !v),
+    'Ctrl+b': () => setSidebarCollapsed(v => !v),
+    '1': () => setActiveTool('crosshair'),
+    '2': () => setActiveTool('trendline'),
+    '3': () => setActiveTool('horizontal_line'),
+    '4': () => setActiveTool('vertical_line'),
+    '5': () => setActiveTool('ray'),
+    '6': () => setActiveTool('parallel_channel'),
+    '7': () => setActiveTool('fib_retracement'),
+    '8': () => setActiveTool('rectangle'),
+    '9': () => setActiveTool('measure'),
+    'Ctrl+1': () => handleIntervalChange('1m'),
+    'Ctrl+2': () => handleIntervalChange('5m'),
+    'Ctrl+3': () => handleIntervalChange('15m'),
+    'Ctrl+4': () => handleIntervalChange('1h'),
+    'Ctrl+5': () => handleIntervalChange('4h'),
+    'Ctrl+6': () => handleIntervalChange('1d'),
+    'Ctrl+7': () => handleIntervalChange('1w'),
+    'Ctrl+8': () => handleIntervalChange('1M'),
+    'Ctrl+i': () => indicatorBarRef.current?.openModal(),
+    'Ctrl+Shift+c': () => chatWidgetRef.current?.toggle(),
+    'Ctrl+Shift+]': () => {
+      const idx = flatWatchlist.findIndex(i => i.sym === symbol && i.type === assetType);
+      if (idx >= 0 && idx < flatWatchlist.length - 1) {
+        const next = flatWatchlist[idx + 1];
+        handleSymbolChange(next.sym, next.type);
+      }
+    },
+    'Ctrl+Shift+[': () => {
+      const idx = flatWatchlist.findIndex(i => i.sym === symbol && i.type === assetType);
+      if (idx > 0) {
+        const prev = flatWatchlist[idx - 1];
+        handleSymbolChange(prev.sym, prev.type);
+      }
+    },
+  });
 
   // --- Interval Interaction Logic ---
   const handleQuickDragStart = (e: React.DragEvent, index: number) => {
@@ -497,19 +566,19 @@ export default function Home() {
   );
 
   return (
-    <div className="flex flex-col h-full min-h-screen bg-[#131722] text-white overflow-hidden">
+    <div className="flex flex-col h-full min-h-screen bg-black text-[#E6EDF3] overflow-hidden">
       {/* ── Global Header ── */}
-      <header className="flex items-center justify-between px-5 h-12 border-b border-gray-800 bg-[#1E222D] shrink-0 z-40 relative">
+      <header className="flex items-center justify-between px-5 h-12 border-b border-[#30363D] bg-black shrink-0 z-40 relative">
         <div className="flex items-center gap-2 w-1/4">
-          <span className="text-white font-bold text-lg tracking-tight">ViewingChart</span>
+          <span className="text-[#E6EDF3] font-bold text-lg tracking-tight">ViewingChart</span>
         </div>
 
         <div className="flex-1 flex justify-center w-2/4">
           <button
             onClick={() => setSearchModalMode('search')}
-            className="w-72 bg-[#131722] border border-gray-700 text-white placeholder-gray-500 py-2 text-sm rounded-full text-left pl-4 hover:border-[#2962FF] transition-colors flex items-center"
+            className="w-72 bg-[#1E222D] border border-[#30363D] text-[#E6EDF3] placeholder-[#6E7681] py-2 text-sm rounded-full text-left pl-4 hover:border-[#D1D5DB] transition-colors flex items-center"
           >
-            <span className="text-gray-500">Search</span>
+            <span className="text-[#6E7681]">Search</span>
           </button>
         </div>
 
@@ -517,18 +586,18 @@ export default function Home() {
           {me?.role === 'superadmin' && (
             <Link
               href="/monitor"
-              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              className="text-xs text-[#6E7681] hover:text-[#8B949E] transition-colors"
               title="Connection monitor"
             >
               Monitor
             </Link>
           )}
-          <UserMenu />
+          <UserMenu onAuthChange={handleAuthChange} />
         </div>
       </header>
 
       {/* ── Body ── */}
-      <div className="flex flex-1 overflow-hidden h-full gap-1 p-1">
+      <div className="flex flex-1 overflow-hidden h-full p-1 relative">
         {/* ── Main Chart Wrapper ── */}
         <main className="flex-1 flex h-full overflow-hidden relative border border-gray-800 bg-[#1E222D]">
           {/* LEFT Drawing Toolbar */}
@@ -643,7 +712,7 @@ export default function Home() {
                   >
                     <button
                       onClick={() => handleIntervalChange(int)}
-                      className={`px-2 py-1 rounded text-xs transition-colors whitespace-nowrap min-w-[2rem] text-center ${chartInterval === int ? 'bg-[#2962FF] text-white font-semibold' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
+                      className={`px-2 py-1 rounded text-xs transition-colors whitespace-nowrap min-w-[2rem] text-center ${chartInterval === int ? 'bg-[#D1D5DB] text-black font-semibold' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
                     >
                       {int}
                     </button>
@@ -669,10 +738,10 @@ export default function Home() {
                         return (
                           <div
                             key={int}
-                            className={`group flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer ${chartInterval === int ? 'bg-[#2962FF]/10' : ''}`}
+                            className={`group flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer ${chartInterval === int ? 'bg-[#D1D5DB]/10' : ''}`}
                             onClick={() => handleIntervalChange(int)}
                           >
-                            <span className={`text-[11px] ${chartInterval === int ? 'text-[#2962FF] font-bold' : 'text-gray-300'}`}>{int}</span>
+                            <span className={`text-[11px] ${chartInterval === int ? 'text-[#D1D5DB] font-bold' : 'text-gray-300'}`}>{int}</span>
 
                             {/* Add/Remove Action (Visible on Hover) */}
                             <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center">
@@ -688,7 +757,7 @@ export default function Home() {
                               {!isInQuick && canAdd && (
                                 <button
                                   onClick={(e) => toggleQuickAccess(int, e)}
-                                  className="text-sm font-bold text-gray-400 hover:text-[#2962FF] hover:bg-[#2962FF]/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
+                                  className="text-sm font-bold text-gray-400 hover:text-[#D1D5DB] hover:bg-[#D1D5DB]/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
                                   title="Add to favorites"
                                 >
                                   ＋
@@ -710,7 +779,7 @@ export default function Home() {
             <div className="flex-1 flex flex-col relative bg-[#1E222D] overflow-hidden min-h-0">
               {isLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-[#1E222D]/80 z-20 backdrop-blur-[1px]">
-                  <div className="w-8 h-8 border-2 border-[#2962FF] border-t-transparent rounded-full animate-spin" />
+                  <div className="w-8 h-8 border-2 border-[#D1D5DB] border-t-transparent rounded-full animate-spin" />
                 </div>
               )}
               <div className="flex-1 min-h-0 relative">
@@ -719,7 +788,7 @@ export default function Home() {
 
               {/* ── Bottom Stack ── */}
               <div className="shrink-0 flex flex-col z-30 w-full bg-[#131722]">
-                <IndicatorBar activeIndicators={activeIndicators} onChange={setActiveIndicators} />
+                <IndicatorBar ref={indicatorBarRef} activeIndicators={activeIndicators} onChange={setActiveIndicators} />
                 <BottomIntervalBar
                   intervals={allIntervals}
                   currentInterval={chartInterval}
@@ -730,40 +799,63 @@ export default function Home() {
           </div>
         </main>
 
-        <WatchlistSidebar
-          watchlists={watchlists ?? undefined}
-          selectedWatchlistId={selectedWatchlistId}
-          onSelectWatchlist={(id) => setSelectedWatchlistId(id)}
-          onCreateWatchlist={token ? createWatchlist : undefined}
-          onRenameWatchlist={token ? renameWatchlist : undefined}
-          onDeleteWatchlist={token ? deleteWatchlist : undefined}
-          onRemoveItem={token ? removeItem : undefined}
-          orderedItems={sidebarOrderedItems}
-          onReorderItems={token ? reorderWatchlistItemsByIds : undefined}
-          onCopyItemToWatchlist={token ? copyItemToWatchlist : undefined}
-          cryptoWatchlist={cryptoWatchlist}
-          stockWatchlist={stockWatchlist}
-          symbol={symbol}
-          assetType={assetType}
-          chartInterval={chartInterval}
-          chartKlines={chartData}
-          chartKlinesLoading={isLoading}
-          mergedTicker={selectedTicker}
-          handleSymbolChange={handleSymbolChange}
-          setSearchModalMode={setSearchModalMode}
-          onSelectedTickerChange={handleSelectedTickerChange}
-        />
+        {!sidebarCollapsed && (
+          <div
+            onMouseDown={sidebarHandleProps.onMouseDown}
+            className="w-1 shrink-0 cursor-col-resize bg-black hover:bg-black active:bg-black"
+          />
+        )}
+
+        <div
+          className={`shrink-0 ${sidebarCollapsed ? 'w-0 overflow-hidden' : ''}`}
+          style={sidebarCollapsed ? {} : { width: sidebarWidth }}
+        >
+          {sidebarCollapsed ? null : (
+            <WatchlistSidebar
+              watchlists={watchlists ?? undefined}
+              selectedWatchlistId={selectedWatchlistId}
+              onSelectWatchlist={(id) => setSelectedWatchlistId(id)}
+              onCreateWatchlist={token ? createWatchlist : undefined}
+              onRenameWatchlist={token ? renameWatchlist : undefined}
+              onDeleteWatchlist={token ? deleteWatchlist : undefined}
+              onRemoveItem={token ? removeItem : undefined}
+              orderedItems={sidebarOrderedItems}
+              onReorderItems={token ? reorderWatchlistItemsByIds : undefined}
+              onCopyItemToWatchlist={token ? copyItemToWatchlist : undefined}
+              cryptoWatchlist={cryptoWatchlist}
+              stockWatchlist={stockWatchlist}
+              symbol={symbol}
+              assetType={assetType}
+              chartInterval={chartInterval}
+              chartKlines={chartData}
+              chartKlinesLoading={isLoading}
+              mergedTicker={selectedTicker}
+              handleSymbolChange={handleSymbolChange}
+              setSearchModalMode={setSearchModalMode}
+              onSelectedTickerChange={handleSelectedTickerChange}
+            />
+          )}
+        </div>
+
+        {/* Sidebar collapse toggle */}
+        <button
+          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          className="absolute right-0 top-0 z-50 w-5 h-10 flex items-center justify-center bg-black border border-[#30363D] rounded-l text-[#8B949E] hover:text-[#E6EDF3] hover:bg-black transition-colors text-xs"
+          title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {sidebarCollapsed ? '◀' : '▶'}
+        </button>
       </div>
 
       {/* Unified Search Modal */}
       {searchModalMode !== 'closed' && (
-        <div className="absolute inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm" onClick={() => setSearchModalMode('closed')}>
-          <div className="bg-[#1E222D] border border-gray-700 rounded-lg shadow-2xl w-[500px] h-[500px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center p-4 border-b border-gray-800 shrink-0">
-              <h3 className="text-white font-bold">
+        <div className="absolute inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm" onClick={() => setSearchModalMode('closed')} onKeyDown={(e) => { if (e.key === 'Escape') setSearchModalMode('closed'); }}>
+          <div className="bg-black border border-[#21262D] rounded-lg shadow-2xl w-[500px] h-[500px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center p-4 border-b border-[#30363D] shrink-0">
+              <h3 className="text-[#E6EDF3] font-bold">
                 {searchModalMode === 'add' ? 'Add Symbol to Watchlist' : 'Search Symbol'}
               </h3>
-              <button onClick={() => setSearchModalMode('closed')} className="text-gray-400 hover:text-white transition-colors">✕</button>
+              <button onClick={() => setSearchModalMode('closed')} className="text-[#8B949E] hover:text-[#E6EDF3] transition-colors">✕</button>
             </div>
             <div className="flex-1 overflow-hidden relative">
               <SymbolSearch
@@ -831,6 +923,9 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      <KeyboardShortcutsHelp isOpen={showShortcutsHelp} onClose={() => setShowShortcutsHelp(false)} />
+      <ChatWidget ref={chatWidgetRef} chartData={chartData} />
     </div>
   );
 }
@@ -839,7 +934,7 @@ const ToolIcon = ({ icon, tooltip, isActive, onClick }: { icon: string, tooltip:
   <button
     title={tooltip}
     onClick={onClick}
-    className={`w-7 h-7 flex items-center justify-center rounded transition-colors text-xs ${isActive ? 'text-[#2962FF] bg-[#2962FF]/10' : 'text-gray-400 hover:text-[#2962FF] hover:bg-[#2962FF]/10'}`}
+    className={`w-7 h-7 flex items-center justify-center rounded transition-colors text-xs ${isActive ? 'text-[#D1D5DB] bg-[#D1D5DB]/10' : 'text-gray-400 hover:text-[#D1D5DB] hover:bg-[#D1D5DB]/10'}`}
   >
     {icon}
   </button>

@@ -123,35 +123,35 @@ export default function AccountPage() {
                             <input
                                 value={me.username}
                                 onChange={(e) => setMe({ ...me, username: e.target.value })}
-                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB]"
                             />
                         </Field>
                         <Field label="Email">
                             <input
                                 value={me.email ?? ""}
                                 onChange={(e) => setMe({ ...me, email: e.target.value })}
-                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB]"
                             />
                         </Field>
                         <Field label="Display name">
                             <input
                                 value={me.display_name ?? ""}
                                 onChange={(e) => setMe({ ...me, display_name: e.target.value })}
-                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB]"
                             />
                         </Field>
                         <Field label="Avatar URL">
                             <input
                                 value={me.avatar_url ?? ""}
                                 onChange={(e) => setMe({ ...me, avatar_url: e.target.value })}
-                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB]"
                             />
                         </Field>
                     </div>
                     <button
                         disabled={saving}
                         onClick={saveProfile}
-                        className="bg-[#2962FF] hover:bg-[#1f4fe0] disabled:opacity-60 disabled:hover:bg-[#2962FF] transition-colors rounded-lg px-4 py-2 text-sm font-black tracking-wide"
+                        className="bg-[#D1D5DB] hover:bg-[#9CA3AF] disabled:opacity-60 disabled:hover:bg-[#D1D5DB] transition-colors rounded-lg px-4 py-2 text-sm font-black tracking-wide"
                     >
                         {saving ? "Saving..." : "Save profile"}
                     </button>
@@ -167,7 +167,7 @@ export default function AccountPage() {
                                 value={currentPassword}
                                 onChange={(e) => setCurrentPassword(e.target.value)}
                                 type="password"
-                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB]"
                             />
                         </Field>
                         <Field label="New password">
@@ -175,7 +175,7 @@ export default function AccountPage() {
                                 value={newPassword}
                                 onChange={(e) => setNewPassword(e.target.value)}
                                 type="password"
-                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2962FF]"
+                                className="w-full bg-[#131722] border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#D1D5DB]"
                             />
                         </Field>
                     </div>
