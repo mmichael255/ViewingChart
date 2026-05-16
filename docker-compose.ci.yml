@@ -5,6 +5,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ci_viewingchart_root
       MYSQL_DATABASE: viewingchart
+      MYSQL_USER: testuser1
+      MYSQL_PASSWORD: test123
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s
@@ -21,8 +23,17 @@ services:
       retries: 15
 
   backend:
+    environment:
+      DB_HOST: mariadb
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
     depends_on:
       mariadb:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  nginx:
+    ports:
+      - "8080:80"

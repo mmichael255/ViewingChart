@@ -10,6 +10,7 @@ backend/**/__pycache__/
 # Scripts and local test files
 backend/scripts/test_*.py
 backend/tests/
+backend/logs/
 scripts/
 
 # Local docs
