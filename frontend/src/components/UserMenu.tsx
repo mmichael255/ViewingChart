@@ -20,12 +20,19 @@ export function UserMenu({ onAuthChange }: { onAuthChange?: () => void }) {
   const router = useRouter();
   const ref = useRef<HTMLDivElement>(null);
 
-  const [token, setToken] = useState<string | null>(() => getAccessToken());
+  const [token, setToken] = useState<string | null>(null);
   const [me, setMe] = useState<Me | null>(null);
+  const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
   const [authMode, setAuthMode] = useState<"closed" | "login" | "register">(
     "closed",
   );
+
+  useEffect(() => {
+    // Read token only after mount — localStorage is not available during SSR
+    setToken(getAccessToken());
+    setReady(true);
+  }, []);
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
@@ -71,7 +78,9 @@ export function UserMenu({ onAuthChange }: { onAuthChange?: () => void }) {
 
   return (
     <div className="relative" ref={ref}>
-      {token ? (
+      {!ready ? (
+        <div className="w-20 h-8" />
+      ) : token ? (
         <>
           <button
             onClick={() => setOpen((v) => !v)}

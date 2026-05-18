@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { API_URL } from "@/config";
 
@@ -18,15 +19,66 @@ interface NewsFeedProps {
 }
 
 export const NewsFeed = ({ compact }: NewsFeedProps) => {
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => setMounted(true), []);
+
     const { data: news, error } = useSWR<NewsItem[]>(`${API_URL}/news`, fetcher);
 
-    if (error) return <div className="p-4 text-red-500 text-xs text-center">Failed to load news</div>;
-    if (!news || !Array.isArray(news)) return <div className="p-4 text-gray-500 text-xs text-center animate-pulse">Loading news...</div>;
+    // SSR-safe: render empty strip until client mount
+    if (!mounted)
+        return (
+            <div className="w-full bg-[#0D1117] h-7 flex items-center px-3">
+                <span className="text-[10px] text-gray-600">News loading...</span>
+            </div>
+        );
 
+    if (error) return (
+        <div className="w-full bg-[#0D1117] h-7 flex items-center px-3">
+            <span className="text-[10px] text-red-500">News unavailable</span>
+        </div>
+    );
+    if (!news || !Array.isArray(news) || news.length === 0)
+        return (
+            <div className="w-full bg-[#0D1117] h-7 flex items-center px-3">
+                <span className="text-[10px] text-gray-600">No news</span>
+            </div>
+        );
+
+    // Compact: marquee ticker, scrolls continuously right → left
+    if (compact) {
+        // Duplicate items so the loop is seamless
+        const doubled = [...news, ...news];
+        return (
+            <div className="w-full bg-[#0D1117] border-t border-[#30363D] h-7 flex items-center overflow-hidden">
+                <div className="animate-marquee flex items-center whitespace-nowrap">
+                    {doubled.map((item, idx) => (
+                        <a
+                            key={`${idx}-${item.title.slice(0, 20)}`}
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 text-[10px] hover:text-gray-200 transition-colors shrink-0 mx-4"
+                        >
+                            <span className="text-gray-600 font-medium">{item.source}</span>
+                            <span className="text-gray-400 max-w-[400px] truncate">{item.title}</span>
+                            <span className={`text-[9px] shrink-0 ${
+                                item.sentiment === 'Bullish' ? 'text-green-400' :
+                                item.sentiment === 'Bearish' ? 'text-red-400' : 'text-gray-500'
+                            }`}>
+                                {item.sentiment}
+                            </span>
+                        </a>
+                    ))}
+                </div>
+            </div>
+        );
+    }
+
+    // Full mode: vertical stacked cards
     return (
-        <div className={`w-full bg-[#1E222D] ${compact ? '' : 'border border-gray-800 rounded-lg p-4 h-[500px] overflow-y-auto'}`}>
-            {!compact && <h2 className="text-xl font-bold mb-4 text-white">Latest News</h2>}
-            <div className={`space-y-4 ${compact ? 'p-3' : ''}`}>
+        <div className="w-full bg-[#1E222D] border border-gray-800 rounded-lg p-4 h-[500px] overflow-y-auto">
+            <h2 className="text-xl font-bold mb-4 text-white">Latest News</h2>
+            <div className="space-y-4">
                 {news.map((item, idx) => (
                     <div key={idx} className="border-b border-gray-800 pb-3 last:border-0 hover:bg-gray-800/30 transition-colors cursor-pointer group rounded-sm p-1">
                         <div className="flex justify-between items-start mb-1 gap-2">

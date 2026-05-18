@@ -108,7 +108,7 @@ async def request_logger(request: Request, call_next):
 
 
 # ── Import & register routers ──
-from app.routers import market_data, chat, news
+from app.routers import market_data, chat, news, macro
 from app.routers import auth as auth_router
 from app.routers import me as me_router
 from app.routers import watchlists as watchlists_router
@@ -127,6 +127,7 @@ if settings.ENVIRONMENT != "production" or __import__("os").getenv("DB_CREATE_AL
 app.include_router(market_data.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(news.router, prefix="/api/v1")
+app.include_router(macro.router, prefix="/api/v1")
 app.include_router(auth_router.router, prefix="/api/v1")
 app.include_router(me_router.router, prefix="/api/v1")
 app.include_router(watchlists_router.router, prefix="/api/v1")

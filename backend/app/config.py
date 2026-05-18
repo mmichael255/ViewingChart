@@ -70,6 +70,11 @@ class Settings:
 
     # ── OpenAI ──
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    
+    # ── Phase 2: News & Macro APIs ──
+    FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+    FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+    NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 
     # ── Auth (JWT) ──
     # In dev, allow a default secret to avoid blocking local auth flows.
