@@ -29,7 +29,7 @@ export interface DrawingStyle {
 }
 
 export const DEFAULT_DRAWING_STYLE: DrawingStyle = {
-    color: '#2962FF',
+    color: '#D1D5DB',
     lineWidth: 2,
     lineStyle: 'solid',
     showLabels: true,

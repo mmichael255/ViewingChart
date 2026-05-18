@@ -14,6 +14,8 @@ import {
 } from '@/lib/connectionResilience';
 import { buildPrePostSegments, formatPrePostDelta } from '@/lib/prepost';
 import { getAccessToken } from '@/lib/auth';
+import { useResizable } from '@/hooks/useResizable';
+import { ResizeHandle } from '@/components/ResizeHandle';
 
 export interface WatchlistSummary {
     id: number;
@@ -25,8 +27,8 @@ interface WatchlistSidebarProps {
     watchlists?: WatchlistSummary[];
     selectedWatchlistId?: number | null;
     onSelectWatchlist?: (id: number) => void;
-    onCreateWatchlist?: () => void;
-    onRenameWatchlist?: () => void;
+    onCreateWatchlist?: (name: string) => void;
+    onRenameWatchlist?: (name: string) => void;
     onDeleteWatchlist?: () => void;
     onRemoveItem?: (sym: string, assetType: string) => void;
     orderedItems?: WatchlistItem[];
@@ -85,6 +87,10 @@ export function WatchlistSidebar({
     const [editItems, setEditItems] = useState<WatchlistItem[]>([]);
     const [editSnapshotItems, setEditSnapshotItems] = useState<WatchlistItem[]>([]);
     const [copyPickerForId, setCopyPickerForId] = useState<number | null>(null);
+    const [showCreateForm, setShowCreateForm] = useState(false);
+    const [showRenameForm, setShowRenameForm] = useState(false);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [formName, setFormName] = useState('');
     const cryptoWatchlistRef = useRef(cryptoWatchlist);
     const stockWatchlistRef = useRef(stockWatchlist);
     useEffect(() => {
@@ -97,6 +103,10 @@ export function WatchlistSidebar({
         setIsEditing(false);
         setCopyPickerForId(null);
         setEditSnapshotItems([]);
+        setShowCreateForm(false);
+        setShowRenameForm(false);
+        setShowDeleteConfirm(false);
+        setFormName('');
     }, [selectedWatchlistId]);
 
     function snapshotItemsForEdit(): WatchlistItem[] {
@@ -383,28 +393,35 @@ export function WatchlistSidebar({
         return all.find((i) => i.sym === symbol) ?? null;
     }, [symbol, cryptoWatchlist, stockWatchlist]);
 
+    const { size: watchlistHeight, isDragging: isDetailDragging, handleProps: detailHandleProps } = useResizable({
+        initialSize: 400,
+        minSize: 200,
+        maxSize: 800,
+        direction: 'vertical',
+    });
+
     const stockPollRemainingMs = useCountdownMs(stockWatchlist.length > 0 ? nextStockPollAtMs : null);
     const stockPollLabel = stockWatchlist.length > 0 && nextStockPollAtMs ? formatCountdownMs(stockPollRemainingMs) : null;
 
     // No longer derive pinned close from the active chart; we prefer the batch-fetched daily close map.
 
     return (
-        <aside className="w-[320px] shrink-0 flex flex-col border border-gray-800 bg-[#1E222D] overflow-hidden z-20 shadow-xl">
+        <aside className="w-full h-full shrink-0 flex flex-col border border-[#30363D] bg-black overflow-hidden z-20 shadow-xl">
             <div className="flex flex-col h-full overflow-hidden">
-                <div className="flex flex-col shrink-0 min-h-[400px] h-[50%] border-b border-gray-800 overflow-hidden relative">
-                    <div className="px-4 py-4 border-b border-gray-800 flex justify-between items-start bg-[#1E222D]">
+                <div className="flex flex-col shrink-0 overflow-hidden relative" style={{ height: watchlistHeight, minHeight: 200 }}>
+                    <div className="px-4 py-4 border-b border-[#30363D] flex justify-between items-start bg-black">
                         <div className="flex flex-col gap-1 min-w-0">
-                            <span className="text-[13px] font-black text-gray-200 uppercase tracking-widest flex items-center gap-2">
+                            <span className="text-sm font-black text-[#E6EDF3] uppercase tracking-widest flex items-center gap-2">
                                 Watchlist
                                 <ConnectionDot status={tickerWsStatus} />
                             </span>
                             {stockPollLabel && (
-                                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
-                                    Stock refresh in <span className="tabular-nums text-gray-300">{stockPollLabel}</span>
+                                <span className="text-xs font-bold text-[#6E7681] uppercase tracking-widest">
+                                    Stock refresh in <span className="tabular-nums text-[#8B949E]">{stockPollLabel}</span>
                                 </span>
                             )}
                             {stockWatchlist.length > 0 && stockPollError && (
-                                <span className="text-[10px] font-bold text-red-300 uppercase tracking-widest" title={stockPollError}>
+                                <span className="text-xs font-bold text-red-300 uppercase tracking-widest" title={stockPollError}>
                                     Stock quote fetch failed
                                 </span>
                             )}
@@ -413,7 +430,7 @@ export function WatchlistSidebar({
                                     <select
                                         value={String(selectedWatchlistId ?? watchlists[0].id)}
                                         onChange={(e) => onSelectWatchlist?.(Number(e.target.value))}
-                                        className="bg-[#131722] border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 outline-none focus:border-[#2962FF] max-w-[150px] truncate"
+                                        className="bg-black border border-[#21262D] rounded px-2 py-1 text-xs text-[#E6EDF3] outline-none focus:border-[#D1D5DB] max-w-[150px] truncate"
                                     >
                                         {watchlists.map((w) => (
                                             <option key={w.id} value={String(w.id)}>
@@ -425,22 +442,22 @@ export function WatchlistSidebar({
                                     {isEditing && (
                                         <>
                                             <button
-                                                onClick={onCreateWatchlist}
-                                                className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/40 hover:bg-gray-800 rounded px-1.5 py-1 transition-colors"
+                                                onClick={() => { setFormName(''); setShowCreateForm(true); }}
+                                                className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/40 hover:bg-[#30363D] rounded px-1.5 py-1 transition-colors"
                                                 title="New list"
                                             >
                                                 New
                                             </button>
                                             <button
-                                                onClick={onRenameWatchlist}
-                                                className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/40 hover:bg-gray-800 rounded px-1.5 py-1 transition-colors"
+                                                onClick={() => { const cur = watchlists?.find(w => w.id === selectedWatchlistId); setFormName(cur?.name ?? ''); setShowRenameForm(true); }}
+                                                className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/40 hover:bg-[#30363D] rounded px-1.5 py-1 transition-colors"
                                                 title="Rename list"
                                             >
                                                 Rename
                                             </button>
                                             <button
-                                                onClick={onDeleteWatchlist}
-                                                className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/40 hover:bg-gray-800 rounded px-1.5 py-1 transition-colors"
+                                                onClick={() => setShowDeleteConfirm(true)}
+                                                className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/40 hover:bg-[#30363D] rounded px-1.5 py-1 transition-colors"
                                                 title="Delete list"
                                             >
                                                 Del
@@ -449,15 +466,82 @@ export function WatchlistSidebar({
                                     )}
                                 </div>
                             )}
+                            {showCreateForm && (
+                                <div className="mt-2 flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        value={formName}
+                                        onChange={e => setFormName(e.target.value)}
+                                        placeholder="Watchlist name"
+                                        className="bg-black border border-[#21262D] rounded px-2 py-1 text-xs text-[#E6EDF3] outline-none focus:border-[#D1D5DB] flex-1 min-w-0"
+                                        autoFocus
+                                        onKeyDown={e => { if (e.key === 'Enter' && formName.trim()) { onCreateWatchlist?.(formName.trim()); setShowCreateForm(false); setFormName(''); } if (e.key === 'Escape') { setShowCreateForm(false); setFormName(''); } }}
+                                    />
+                                    <button
+                                        onClick={() => { if (formName.trim()) { onCreateWatchlist?.(formName.trim()); setShowCreateForm(false); setFormName(''); } }}
+                                        className="text-xs font-black uppercase tracking-widest text-[#D1D5DB] hover:text-white bg-[#D1D5DB]/10 hover:bg-[#D1D5DB]/20 rounded px-2 py-1 transition-colors"
+                                    >
+                                        Create
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowCreateForm(false); setFormName(''); }}
+                                        className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/30 hover:bg-[#30363D] rounded px-2 py-1 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            )}
+                            {showRenameForm && (
+                                <div className="mt-2 flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        value={formName}
+                                        onChange={e => setFormName(e.target.value)}
+                                        placeholder="Watchlist name"
+                                        className="bg-black border border-[#21262D] rounded px-2 py-1 text-xs text-[#E6EDF3] outline-none focus:border-[#D1D5DB] flex-1 min-w-0"
+                                        autoFocus
+                                        onKeyDown={e => { if (e.key === 'Enter' && formName.trim()) { onRenameWatchlist?.(formName.trim()); setShowRenameForm(false); setFormName(''); } if (e.key === 'Escape') { setShowRenameForm(false); setFormName(''); } }}
+                                    />
+                                    <button
+                                        onClick={() => { if (formName.trim()) { onRenameWatchlist?.(formName.trim()); setShowRenameForm(false); setFormName(''); } }}
+                                        className="text-xs font-black uppercase tracking-widest text-[#D1D5DB] hover:text-white bg-[#D1D5DB]/10 hover:bg-[#D1D5DB]/20 rounded px-2 py-1 transition-colors"
+                                    >
+                                        Rename
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowRenameForm(false); setFormName(''); }}
+                                        className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/30 hover:bg-[#30363D] rounded px-2 py-1 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            )}
+                            {showDeleteConfirm && (
+                                <div className="mt-2 flex items-center gap-2">
+                                    <span className="text-xs font-bold text-[#8B949E] uppercase tracking-widest">Delete this list?</span>
+                                    <button
+                                        onClick={() => { onDeleteWatchlist?.(); setShowDeleteConfirm(false); }}
+                                        className="text-xs font-black uppercase tracking-widest text-red-400 hover:text-white bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded px-2 py-1 transition-colors"
+                                    >
+                                        Delete
+                                    </button>
+                                    <button
+                                        onClick={() => setShowDeleteConfirm(false)}
+                                        className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/30 hover:bg-[#30363D] rounded px-2 py-1 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            )}
                         </div>
                         <button
                             onClick={() => setSearchModalMode('add')}
-                            className="mt-[1px] text-xs font-bold text-[#2962FF] hover:text-white bg-[#2962FF]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
+                            className="mt-[1px] text-xs font-bold text-[#D1D5DB] hover:text-white bg-[#D1D5DB]/10 px-3 py-1.5 rounded transition-all flex items-center gap-1.5"
                         >
                             <span className="text-sm leading-none">＋</span> Add
                         </button>
                     </div>
-                    <div className="grid grid-cols-12 px-4 py-1.5 text-[9px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-800/50 bg-[#1E222D]">
+                    <div className="grid grid-cols-12 px-4 py-1.5 text-[11px] font-black text-[#6E7681] uppercase tracking-widest border-b border-[#30363D]/50 bg-black">
                         <div className="col-span-4">Symbol</div>
                         <div className="col-span-3 text-right">Last</div>
                         <div className="col-span-2 text-right">Chg</div>
@@ -485,6 +569,7 @@ export function WatchlistSidebar({
                                         await onCopyItemToWatchlist(itemId, destId);
                                         setCopyPickerForId(null);
                                     }}
+                                    onRemoveItem={onRemoveItem}
                                 />
                             ) : (
                                 <>
@@ -494,7 +579,6 @@ export function WatchlistSidebar({
                                             tickers={tickers}
                                             handleSymbolChange={handleSymbolChange}
                                             symbol={symbol}
-                                            onRemoveItem={onRemoveItem}
                                         />
                                     ) : (
                                         <>
@@ -504,7 +588,6 @@ export function WatchlistSidebar({
                                                 handleSymbolChange={handleSymbolChange}
                                                 symbol={symbol}
                                                 type="crypto"
-                                                onRemoveItem={onRemoveItem}
                                             />
                                             <WatchlistGroup
                                                 items={stockWatchlist}
@@ -512,7 +595,6 @@ export function WatchlistSidebar({
                                                 handleSymbolChange={handleSymbolChange}
                                                 symbol={symbol}
                                                 type="stock"
-                                                onRemoveItem={onRemoveItem}
                                             />
                                         </>
                                     )}
@@ -520,7 +602,7 @@ export function WatchlistSidebar({
                             )}
                         </div>
                         {onReorderItems && (
-                            <div className="shrink-0 flex justify-end px-3 py-2 border-t border-gray-800/80 bg-[#1E222D]">
+                            <div className="shrink-0 flex justify-end px-3 py-2 border-t border-[#30363D]/80 bg-black">
                                 <div className="flex items-center gap-2">
                                     {isEditing && (
                                         <button
@@ -531,7 +613,7 @@ export function WatchlistSidebar({
                                                     setEditItems(editSnapshotItems.map((x) => ({ ...x })));
                                                 }
                                             }}
-                                            className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-white bg-gray-800/30 hover:bg-gray-800/60 border border-gray-800 rounded px-3 py-1.5 transition-colors"
+                                            className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/30 hover:bg-[#30363D]/60 border border-[#30363D] rounded px-3 py-1.5 transition-colors"
                                             title="Reset to pre-edit order"
                                         >
                                             Reset
@@ -557,7 +639,7 @@ export function WatchlistSidebar({
                                             await onReorderItems(ids);
                                             setIsEditing(false);
                                         }}
-                                        className="text-[10px] font-black uppercase tracking-widest text-gray-300 hover:text-white bg-gray-800/50 hover:bg-gray-800 border border-gray-700 rounded px-3 py-1.5 transition-colors"
+                                        className="text-xs font-black uppercase tracking-widest text-[#8B949E] hover:text-[#E6EDF3] bg-[#30363D]/50 hover:bg-[#30363D] border border-[#30363D] rounded px-3 py-1.5 transition-colors"
                                         title={isEditing ? "Save order and exit" : "Reorder symbols and manage lists"}
                                     >
                                         {isEditing ? "Done" : "Edit"}
@@ -567,7 +649,10 @@ export function WatchlistSidebar({
                         )}
                     </div>
                 </div>
-                <div className="flex-1 flex flex-col bg-[#1E222D] overflow-hidden min-h-0">
+
+                <ResizeHandle direction="vertical" isDragging={isDetailDragging} {...detailHandleProps} />
+
+                <div className="flex-1 flex flex-col bg-black overflow-hidden min-h-0">
                     <SymbolDetailPanel
                         symbol={symbol}
                         assetType={assetType}
@@ -642,7 +727,6 @@ interface WatchlistGroupProps {
     handleSymbolChange: (newSymbol: string, type: string) => void;
     symbol: string;
     type: string;
-    onRemoveItem?: (sym: string, assetType: string) => void;
 }
 
 const EMPTY_TICKER: TickerData = { lastPrice: 0, priceChange: 0, priceChangePercent: 0 };
@@ -654,7 +738,7 @@ function displayLastForStock(t: TickerData): number {
     return t.lastPrice;
 }
 
-const WatchlistGroup = ({ items, tickers, handleSymbolChange, symbol, type, onRemoveItem }: WatchlistGroupProps) => (
+const WatchlistGroup = ({ items, tickers, handleSymbolChange, symbol, type }: WatchlistGroupProps) => (
     <>
         {items.map(({ sym, label, sub, source }) => {
             const ticker: TickerData = tickers[sym] ?? EMPTY_TICKER;
@@ -665,38 +749,25 @@ const WatchlistGroup = ({ items, tickers, handleSymbolChange, symbol, type, onRe
                 <button
                     key={sym}
                     onClick={() => handleSymbolChange(sym, type)}
-                    className={`w-full block rounded mb-0.5 transition-all outline-none group text-left ${symbol === sym ? 'bg-[#2962FF]/10' : 'hover:bg-gray-800/40'}`}
+                    className={`w-full block rounded mb-0.5 transition-all outline-none group text-left border-l-2 ${symbol === sym ? 'bg-[#D1D5DB]/10 border-[#D1D5DB]' : 'hover:bg-[#30363D]/70 border-transparent'}`}
                 >
-                    <div className="grid grid-cols-12 items-center px-3 py-2">
+                    <div className="grid grid-cols-12 items-center px-3 py-2.5">
                         <div className="col-span-4 text-left">
                             <div className="flex items-center gap-2">
-                                <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
-                                {onRemoveItem && (
-                                    <button
-                                        type="button"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            onRemoveItem(sym, type);
-                                        }}
-                                        className="opacity-0 group-hover:opacity-100 text-[10px] font-black text-gray-500 hover:text-red-300 bg-gray-900/30 hover:bg-red-500/10 border border-gray-800 hover:border-red-500/30 rounded px-1.5 py-0.5 transition-all"
-                                        title="Remove"
-                                    >
-                                        ✕
-                                    </button>
-                                )}
+                                <div className={`text-sm font-bold leading-none ${symbol === sym ? 'text-[#D1D5DB]' : 'text-[#E6EDF3] group-hover:text-white'}`}>{label}</div>
                             </div>
-                            <div className="text-[8px] text-gray-500 font-medium truncate mt-0.5 flex items-center gap-1">
+                            <div className="text-[9px] text-[#6E7681] font-medium truncate mt-0.5 flex items-center gap-1">
                                 <span>{sub}</span>
-                                {source && <span className="text-[7px] uppercase bg-gray-800 px-1 py-0.5 rounded text-gray-400 tracking-widest">{source}</span>}
+                                {source && <span className="text-[8px] uppercase bg-[#30363D] px-1 py-0.5 rounded text-[#8B949E] tracking-widest">{source}</span>}
                             </div>
                         </div>
                         <div className="col-span-3 text-right">
-                            <PriceHighlight price={shownLast} className="text-[11px] font-bold" />
+                            <PriceHighlight price={shownLast} className="text-xs font-bold" />
                         </div>
-                        <div className={`col-span-2 text-right text-[10px] font-medium ${colorClass}`}>
+                        <div className={`col-span-2 text-right text-xs font-medium ${colorClass}`}>
                             {ticker.priceChange ? (ticker.priceChange > 0 ? '+' : '') + ticker.priceChange.toFixed(2) : '0.00'}
                         </div>
-                        <div className={`col-span-3 text-right text-[10px] font-bold ${colorClass}`}>
+                        <div className={`col-span-3 text-right text-xs font-bold ${colorClass}`}>
                             {ticker.priceChangePercent ? (ticker.priceChangePercent > 0 ? '+' : '') + ticker.priceChangePercent.toFixed(2) + '%' : '0.00%'}
                         </div>
                     </div>
@@ -712,13 +783,11 @@ function MixedWatchlist({
     tickers,
     handleSymbolChange,
     symbol,
-    onRemoveItem,
 }: {
     items: WatchlistItem[];
     tickers: Record<string, TickerData>;
     handleSymbolChange: (newSymbol: string, type: string) => void;
     symbol: string;
-    onRemoveItem?: (sym: string, assetType: string) => void;
 }) {
     return (
         <>
@@ -732,43 +801,30 @@ function MixedWatchlist({
                     <button
                         key={String(id ?? sym)}
                         onClick={() => handleSymbolChange(sym, type)}
-                        className={`w-full block rounded mb-0.5 transition-all outline-none group text-left ${symbol === sym ? 'bg-[#2962FF]/10' : 'hover:bg-gray-800/40'}`}
+                        className={`w-full block rounded mb-0.5 transition-all outline-none group text-left border-l-2 ${symbol === sym ? 'bg-[#D1D5DB]/10 border-[#D1D5DB]' : 'hover:bg-[#30363D]/70 border-transparent'}`}
                     >
-                        <div className="grid grid-cols-12 items-center px-3 py-2">
+                        <div className="grid grid-cols-12 items-center px-3 py-2.5">
                             <div className="col-span-4 text-left">
                                 <div className="flex items-center gap-2">
-                                    <div className={`text-xs font-bold leading-none ${symbol === sym ? 'text-[#2962FF]' : 'text-gray-200 group-hover:text-white'}`}>{label}</div>
+                                    <div className={`text-sm font-bold leading-none ${symbol === sym ? 'text-[#D1D5DB]' : 'text-[#E6EDF3] group-hover:text-white'}`}>{label}</div>
                                     {type === 'stock' && (
-                                        <span className="text-[8px] font-black uppercase tracking-widest bg-gray-900/40 border border-gray-800 rounded px-1 py-0.5 text-gray-400">
+                                        <span className="text-[8px] font-black uppercase tracking-widest bg-black/40 border border-[#30363D] rounded px-1 py-0.5 text-[#8B949E]">
                                             STK
                                         </span>
                                     )}
-                                    {onRemoveItem && (
-                                        <button
-                                            type="button"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onRemoveItem(sym, type);
-                                            }}
-                                            className="opacity-0 group-hover:opacity-100 text-[10px] font-black text-gray-500 hover:text-red-300 bg-gray-900/30 hover:bg-red-500/10 border border-gray-800 hover:border-red-500/30 rounded px-1.5 py-0.5 transition-all"
-                                            title="Remove"
-                                        >
-                                            ✕
-                                        </button>
-                                    )}
-                                </div>
-                                <div className="text-[8px] text-gray-500 font-medium truncate mt-0.5 flex items-center gap-1">
+                                    </div>
+                                <div className="text-[9px] text-[#6E7681] font-medium truncate mt-0.5 flex items-center gap-1">
                                     <span>{sub}</span>
-                                    {source && <span className="text-[7px] uppercase bg-gray-800 px-1 py-0.5 rounded text-gray-400 tracking-widest">{source}</span>}
+                                    {source && <span className="text-[8px] uppercase bg-[#30363D] px-1 py-0.5 rounded text-[#8B949E] tracking-widest">{source}</span>}
                                 </div>
                             </div>
                             <div className="col-span-3 text-right">
-                                <PriceHighlight price={shownLast} className="text-[11px] font-bold" />
+                                <PriceHighlight price={shownLast} className="text-xs font-bold" />
                             </div>
-                            <div className={`col-span-2 text-right text-[10px] font-medium ${colorClass}`}>
+                            <div className={`col-span-2 text-right text-xs font-medium ${colorClass}`}>
                                 {ticker.priceChange ? (ticker.priceChange > 0 ? '+' : '') + ticker.priceChange.toFixed(2) : '0.00'}
                             </div>
-                            <div className={`col-span-3 text-right text-[10px] font-bold ${colorClass}`}>
+                            <div className={`col-span-3 text-right text-xs font-bold ${colorClass}`}>
                                 {ticker.priceChangePercent ? (ticker.priceChangePercent > 0 ? '+' : '') + ticker.priceChangePercent.toFixed(2) + '%' : '0.00%'}
                             </div>
                         </div>
@@ -788,6 +844,7 @@ function EditableWatchlist({
     setCopyPickerForId,
     onMove,
     onCopy,
+    onRemoveItem,
 }: {
     items: WatchlistItem[];
     watchlists?: WatchlistSummary[];
@@ -796,6 +853,7 @@ function EditableWatchlist({
     setCopyPickerForId: (id: number | null) => void;
     onMove: (fromIndex: number, toIndex: number) => void;
     onCopy: (itemId: number, destWatchlistId: number) => Promise<void> | void;
+    onRemoveItem?: (sym: string, assetType: string) => void;
 }) {
     const destOptions = (watchlists ?? []).filter((w) => w.id !== selectedWatchlistId);
 
@@ -812,27 +870,40 @@ function EditableWatchlist({
                 return (
                     <div
                         key={`${i.sym}-${i.asset_type ?? ''}-${id ?? idx}`}
-                        className="relative flex items-center gap-2 px-3 py-2 rounded mb-0.5 bg-gray-800/30 hover:bg-gray-800/50 transition-colors"
+                        className="relative flex items-center gap-2 px-3 py-2.5 rounded mb-0.5 bg-[#30363D]/30 hover:bg-[#30363D]/50 transition-colors"
                     >
                         <div className="flex items-center gap-2 min-w-0 flex-1">
-                            <div className="text-xs font-bold text-gray-200 truncate">{i.label ?? i.sym}</div>
+                            <div className="text-sm font-bold text-[#E6EDF3] truncate">{i.label ?? i.sym}</div>
                             {badge && (
-                                <span className="text-[8px] font-black uppercase tracking-widest bg-gray-900/40 border border-gray-800 rounded px-1 py-0.5 text-gray-400">
+                                <span className="text-[8px] font-black uppercase tracking-widest bg-black/40 border border-[#30363D] rounded px-1 py-0.5 text-[#8B949E]">
                                     {badge}
                                 </span>
                             )}
-                            <div className="text-[9px] text-gray-500 font-medium truncate">{i.sub}</div>
+                            <div className="text-xs text-[#6E7681] font-medium truncate">{i.sub}</div>
                         </div>
 
                         <div className="flex items-center gap-1 shrink-0">
+                            {onRemoveItem && (
+                                <button
+                                    type="button"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onRemoveItem(i.sym, i.asset_type ?? 'crypto');
+                                    }}
+                                    className="text-xs font-black uppercase tracking-widest text-[#6E7681] hover:text-red-300 bg-black/30 hover:bg-red-500/10 border border-[#30363D] hover:border-red-500/30 rounded px-1.5 py-1 transition-colors"
+                                    title="Remove from watchlist"
+                                >
+                                    ✕
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 disabled={!canMoveUp}
                                 onClick={() => canMoveUp && onMove(idx, idx - 1)}
-                                className={`text-[10px] font-black uppercase tracking-widest border rounded px-1.5 py-1 transition-colors ${
+                                className={`text-xs font-black uppercase tracking-widest border rounded px-1.5 py-1 transition-colors ${
                                     canMoveUp
-                                        ? 'text-gray-300 hover:text-white bg-gray-900/30 hover:bg-gray-900/60 border-gray-800'
-                                        : 'text-gray-600 bg-gray-900/20 border-gray-900/20 cursor-not-allowed'
+                                        ? 'text-[#8B949E] hover:text-[#E6EDF3] bg-black/30 hover:bg-black/60 border-[#30363D]'
+                                        : 'text-[#30363D] bg-black/20 border-[#0D1117]/20 cursor-not-allowed'
                                 }`}
                                 title="Move up"
                             >
@@ -842,10 +913,10 @@ function EditableWatchlist({
                                 type="button"
                                 disabled={!canMoveDown}
                                 onClick={() => canMoveDown && onMove(idx, idx + 1)}
-                                className={`text-[10px] font-black uppercase tracking-widest border rounded px-1.5 py-1 transition-colors ${
+                                className={`text-xs font-black uppercase tracking-widest border rounded px-1.5 py-1 transition-colors ${
                                     canMoveDown
-                                        ? 'text-gray-300 hover:text-white bg-gray-900/30 hover:bg-gray-900/60 border-gray-800'
-                                        : 'text-gray-600 bg-gray-900/20 border-gray-900/20 cursor-not-allowed'
+                                        ? 'text-[#8B949E] hover:text-[#E6EDF3] bg-black/30 hover:bg-black/60 border-[#30363D]'
+                                        : 'text-[#30363D] bg-black/20 border-[#0D1117]/20 cursor-not-allowed'
                                 }`}
                                 title="Move down"
                             >
@@ -859,10 +930,10 @@ function EditableWatchlist({
                                     if (!canCopy) return;
                                     setCopyPickerForId(isPickerOpen ? null : (id as number));
                                 }}
-                                className={`text-[10px] font-black uppercase tracking-widest border rounded px-2 py-1 transition-colors ${
+                                className={`text-xs font-black uppercase tracking-widest border rounded px-2 py-1 transition-colors ${
                                     canCopy
-                                        ? 'text-[#2962FF] hover:text-white bg-[#2962FF]/10 hover:bg-[#2962FF]/20 border-[#2962FF]/20'
-                                        : 'text-gray-600 bg-gray-900/20 border-gray-900/20 cursor-not-allowed'
+                                        ? 'text-[#D1D5DB] hover:text-white bg-[#D1D5DB]/10 hover:bg-[#D1D5DB]/20 border-[#D1D5DB]/20'
+                                        : 'text-[#30363D] bg-black/20 border-[#0D1117]/20 cursor-not-allowed'
                                 }`}
                                 title="Add to another watchlist"
                             >
@@ -870,8 +941,8 @@ function EditableWatchlist({
                             </button>
 
                             {isPickerOpen && (
-                                <div className="absolute right-3 top-full mt-1 z-50 bg-[#131722] border border-gray-700 rounded shadow-2xl overflow-hidden min-w-[170px]">
-                                    <div className="px-2 py-1 text-[9px] font-black uppercase tracking-widest text-gray-500 border-b border-gray-800">
+                                <div className="absolute right-3 top-full mt-1 z-50 bg-black border border-[#21262D] rounded shadow-2xl overflow-hidden min-w-[170px]">
+                                    <div className="px-2 py-1 text-xs font-black uppercase tracking-widest text-[#6E7681] border-b border-[#30363D]">
                                         Add to…
                                     </div>
                                     {destOptions.map((w) => (
@@ -879,7 +950,7 @@ function EditableWatchlist({
                                             key={w.id}
                                             type="button"
                                             onClick={() => typeof id === 'number' && onCopy(id, w.id)}
-                                            className="w-full text-left px-2 py-2 text-[11px] text-gray-200 hover:bg-gray-800/60 transition-colors"
+                                            className="w-full text-left px-2 py-2 text-xs text-[#E6EDF3] hover:bg-[#30363D]/60 transition-colors"
                                         >
                                             {w.is_default ? '★ ' : ''}
                                             {w.name}

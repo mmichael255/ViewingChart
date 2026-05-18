@@ -128,7 +128,7 @@ export class DrawingManager {
         this.removePreview();
 
         // Create temporary preview primitive
-        const style: DrawingStyle = { ...DEFAULT_DRAWING_STYLE, color: '#2962FF80' };
+        const style: DrawingStyle = { ...DEFAULT_DRAWING_STYLE, color: '#D1D5DB80' };
         this._previewPrimitive = this.createPrimitive('__preview', type, points, style);
         if (this._previewPrimitive) {
             this._previewPrimitive.setSelected(true); // Always show control points on preview
@@ -328,6 +328,23 @@ export class DrawingManager {
     cancelDrawing(): void {
         this._pendingPoints = [];
         this.removePreview();
+    }
+
+    nudgeSelected(dx: number, _dy?: number): void {
+        if (!this._selectedId) return;
+        const primitive = this._drawings.get(this._selectedId);
+        if (!primitive) return;
+        const points = primitive.points;
+        if (!points || points.length === 0) return;
+
+        // Nudge time by dx time units (positive = forward, negative = backward)
+        const nudged = points.map((p) => ({
+            ...p,
+            time: (Number(p.time) + dx) as Time,
+        }));
+        primitive.setPoints(nudged);
+        primitive.requestUpdate();
+        this.save();
     }
 
     get isDrawing(): boolean {

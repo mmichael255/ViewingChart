@@ -66,10 +66,10 @@ function Card({
     children: ReactNode;
 }) {
     return (
-        <div className="rounded-lg border border-gray-600/50 bg-gradient-to-b from-[#2a3040] to-[#232834] px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-            <div className="flex items-center gap-2 mb-2.5 pb-2 border-b border-gray-600/40">
-                <span className="h-2 w-0.5 rounded-full bg-[#2962FF] shrink-0" aria-hidden />
-                <span className="text-[10px] font-black text-gray-200 uppercase tracking-widest leading-none">
+        <div className="rounded-lg border border-[#30363D] bg-gradient-to-b from-[#1a1a1a] to-black px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <div className="flex items-center gap-2 mb-2.5 pb-2 border-b border-[#30363D]/40">
+                <span className="h-2 w-0.5 rounded-full bg-[#D1D5DB] shrink-0" aria-hidden />
+                <span className="text-xs font-black text-[#E6EDF3] uppercase tracking-widest leading-none">
                     {title}
                 </span>
             </div>
@@ -80,9 +80,9 @@ function Card({
 
 function StatRow({ label, value }: { label: string; value: ReactNode }) {
     return (
-        <div className="flex justify-between items-baseline gap-3 text-[12px] py-1.5 first:pt-0 border-b border-gray-700/50 last:border-0 last:pb-0">
-            <span className="text-gray-400 shrink-0 font-medium">{label}</span>
-            <span className="text-gray-100 tabular-nums text-right font-semibold truncate">{value}</span>
+        <div className="flex justify-between items-baseline gap-3 text-sm py-1.5 first:pt-0 border-b border-[#30363D]/50 last:border-0 last:pb-0">
+            <span className="text-[#8B949E] shrink-0 font-medium">{label}</span>
+            <span className="text-[#E6EDF3] tabular-nums text-right font-semibold truncate">{value}</span>
         </div>
     );
 }
@@ -108,7 +108,7 @@ function PerformanceGrid({ rows }: { rows: { label: string; pct: number | null }
                 const has = v != null && Number.isFinite(v);
                 const up = has && (v as number) >= 0;
                 const bg = !has
-                    ? "bg-gray-800/40 border-gray-700/50"
+                    ? "bg-[#30363D]/40 border-[#30363D]/50"
                     : up
                       ? "bg-emerald-950/70 border-emerald-700/40"
                       : "bg-rose-950/70 border-rose-700/40";
@@ -118,10 +118,10 @@ function PerformanceGrid({ rows }: { rows: { label: string; pct: number | null }
                         className={`rounded border px-1 py-1.5 text-center ${bg}`}
                         title={has ? `${(v as number).toFixed(2)}%` : "No data"}
                     >
-                        <div className="text-[9px] font-black text-gray-400 uppercase tracking-tight">{r.label}</div>
+                        <div className="text-xs font-black text-[#8B949E] uppercase tracking-tight">{r.label}</div>
                         <div
-                            className={`text-[11px] font-bold tabular-nums mt-0.5 ${
-                                !has ? "text-gray-500" : up ? "text-emerald-300" : "text-rose-300"
+                            className={`text-xs font-bold tabular-nums mt-0.5 ${
+                                !has ? "text-[#6E7681]" : up ? "text-emerald-300" : "text-rose-300"
                             }`}
                         >
                             {has ? `${up ? "+" : ""}${(v as number).toFixed(1)}%` : "—"}
@@ -330,7 +330,7 @@ function SeasonalsYearCompareChart({ lines }: { lines: SeasonalYearLine[] }) {
                 <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
                 {!hasLines && (
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <p className="text-[12px] text-gray-400">No candle data.</p>
+                        <p className="text-sm text-gray-400">No candle data.</p>
                     </div>
                 )}
                 {hasLines && hover ? (
@@ -349,7 +349,7 @@ function SeasonalsYearCompareChart({ lines }: { lines: SeasonalYearLine[] }) {
                                     return (
                                         <div
                                             key={ln.year}
-                                            className="flex items-center gap-2 text-[10px] tabular-nums leading-tight"
+                                            className="flex items-center gap-2 text-xs tabular-nums leading-tight"
                                         >
                                             <span
                                                 className="h-2 w-2 shrink-0 rounded-full border border-gray-900/60 ring-1 ring-black/30"
@@ -383,7 +383,7 @@ function SeasonalsYearCompareChart({ lines }: { lines: SeasonalYearLine[] }) {
             </div>
 
             {hasLines ? (
-                <div className="mt-1.5 flex justify-center gap-4 text-[11px] text-gray-400">
+                <div className="mt-1.5 flex justify-center gap-4 text-xs text-gray-400">
                     {lines.map((ln) => (
                             <div key={ln.year} className="flex shrink-0 items-center gap-2 tabular-nums">
                                 <span
@@ -509,35 +509,35 @@ export function SymbolDetailPanel({
 
     if (!symbol) {
         return (
-            <div className="flex-1 flex items-center justify-center p-4 text-gray-400 text-xs">No symbol</div>
+            <div className="flex-1 flex items-center justify-center p-4 text-[#6E7681] text-xs">No symbol</div>
         );
     }
 
     return (
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-[#1a1f2e]">
-            <div className="shrink-0 px-3.5 py-2.5 border-b border-gray-600/50 bg-[#222836] flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#2962FF] shadow-[0_0_8px_rgba(41,98,255,0.7)]" aria-hidden />
-                <span className="text-[10px] font-black text-gray-200 uppercase tracking-[0.2em]">Symbol detail</span>
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-black">
+            <div className="shrink-0 px-3.5 py-2.5 border-b border-[#30363D]/50 bg-black flex items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#D1D5DB] shadow-[0_0_8px_rgba(209,213,219,0.7)]" aria-hidden />
+                <span className="text-xs font-black text-[#E6EDF3] uppercase tracking-[0.2em]">Symbol detail</span>
             </div>
             <div className="flex-1 overflow-y-auto p-3.5 space-y-3.5 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-transparent">
                 {showLoading && (
                     <div className="flex justify-center py-8">
-                        <div className="w-7 h-7 border-2 border-[#2962FF] border-t-transparent rounded-full animate-spin shadow-[0_0_12px_rgba(41,98,255,0.35)]" />
+                        <div className="w-7 h-7 border-2 border-[#D1D5DB] border-t-transparent rounded-full animate-spin shadow-[0_0_12px_rgba(209,213,219,0.35)]" />
                     </div>
                 )}
 
                 {/* Header snapshot */}
-                <div className="rounded-lg border border-gray-600/50 bg-gradient-to-br from-[#2e3548] via-[#282e3f] to-[#1f2433] px-3.5 py-3 shadow-lg shadow-black/20 ring-1 ring-white/[0.06]">
+                <div className="rounded-lg border border-[#30363D] bg-gradient-to-br from-[#1a1a1a] via-[#0d0d0d] to-black px-3.5 py-3 shadow-lg shadow-black/20 ring-1 ring-white/[0.06]">
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                         <div className="min-w-0">
-                            <div className="text-[15px] font-extrabold text-white tracking-tight truncate drop-shadow-sm">
+                            <div className="text-[15px] font-extrabold text-[#E6EDF3] tracking-tight truncate drop-shadow-sm">
                                 {symbol}
                             </div>
                             {watchlistMeta?.sub && (
-                                <div className="text-[11px] text-gray-400 truncate mt-1 font-medium">{watchlistMeta.sub}</div>
+                                <div className="text-xs text-[#8B949E] truncate mt-1 font-medium">{watchlistMeta.sub}</div>
                             )}
                         </div>
-                        <span className="text-[9px] font-bold uppercase px-2 py-1 rounded-md border border-gray-500/60 bg-gray-900/70 text-gray-200 tracking-widest shrink-0 shadow-inner">
+                        <span className="text-xs font-bold uppercase px-2 py-1 rounded-md border border-[#30363D]/60 bg-[#0D1117]/70 text-[#8B949E] tracking-widest shrink-0 shadow-inner">
                             {sourceBadge}
                         </span>
                     </div>
@@ -545,7 +545,7 @@ export function SymbolDetailPanel({
                         {headerPrice != null ? (
                             <PriceHighlight price={headerPrice} className="text-lg font-bold tabular-nums" />
                         ) : (
-                            <span className="text-gray-500 text-base font-semibold">—</span>
+                            <span className="text-[#6E7681] text-base font-semibold">—</span>
                         )}
                         {ticker ? (
                             <>
@@ -587,12 +587,12 @@ export function SymbolDetailPanel({
                         ) : null}
                     </div>
                     {isStock && ticker?.session && (
-                        <div className="mt-3 pt-2.5 border-t border-gray-600/40 flex flex-wrap items-center gap-2 text-[10px]">
+                        <div className="mt-3 pt-2.5 border-t border-[#30363D]/40 flex flex-wrap items-center gap-2 text-xs">
                             <span className="font-bold uppercase tracking-wider text-sky-200 bg-sky-500/20 border border-sky-500/30 px-2 py-1 rounded-md">
                                 {sessionLabel[ticker.session] ?? ticker.session}
                             </span>
                             {ticker.asOf && (
-                                <span className="text-gray-400 tabular-nums font-medium">{formatEtTime(ticker.asOf)} ET</span>
+                                <span className="text-[#6E7681] tabular-nums font-medium">{formatEtTime(ticker.asOf)} ET</span>
                             )}
                             {ticker.isStale && (
                                 <span className="text-[9px] font-bold uppercase text-amber-200 bg-amber-500/20 border border-amber-500/35 px-2 py-1 rounded-md">
@@ -602,7 +602,7 @@ export function SymbolDetailPanel({
                         </div>
                     )}
                     {!isStock && ticker?.isStale && (
-                        <div className="mt-3 pt-2.5 border-t border-gray-600/40">
+                        <div className="mt-3 pt-2.5 border-t border-[#30363D]/40">
                             <span className="text-[9px] font-bold uppercase text-amber-200 bg-amber-500/20 border border-amber-500/35 px-2 py-1 rounded-md">
                                 Stale
                             </span>
@@ -612,12 +612,12 @@ export function SymbolDetailPanel({
 
                 {/* Performance (calendar horizons vs loaded series) */}
                 <Card title="Performance">
-                    <p className="text-[10px] text-gray-400 mb-2.5 leading-snug">
+                    <p className="text-xs text-[#8B949E] mb-2.5 leading-snug">
                         % change vs past close on calendar horizons (UTC), same series as the chart (
-                        <span className="font-semibold text-gray-300">{chartInterval}</span>).
+                        <span className="font-semibold text-[#E6EDF3]">{chartInterval}</span>).
                     </p>
                     {!klines?.length ? (
-                        <p className="text-[12px] text-gray-400 leading-relaxed px-0.5">No candle data.</p>
+                        <p className="text-xs text-[#8B949E] leading-relaxed px-0.5">No candle data.</p>
                     ) : (
                         <PerformanceGrid rows={performanceRows} />
                     )}
@@ -626,23 +626,23 @@ export function SymbolDetailPanel({
                 {/* Range + volume */}
                 <Card title="Range & volume">
                     {!lastBar || rangePct == null ? (
-                        <p className="text-[12px] text-gray-400 leading-relaxed px-0.5">
+                        <p className="text-xs text-[#8B949E] leading-relaxed px-0.5">
                             Need OHLC for the active bar.
                         </p>
                     ) : (
                         <>
-                            <div className="mb-3 rounded-md border border-gray-600/40 bg-black/25 p-2.5">
-                                <div className="flex justify-between text-[11px] text-gray-300 mb-2 tabular-nums font-semibold">
+                            <div className="mb-3 rounded-md border border-[#30363D]/40 bg-black/25 p-2.5">
+                                <div className="flex justify-between text-xs text-[#8B949E] mb-2 tabular-nums font-semibold">
                                     <span className="text-emerald-400/90">L {formatNumber(lastBar.low)}</span>
                                     <span className="text-rose-400/90">H {formatNumber(lastBar.high)}</span>
                                 </div>
                                 <div className="h-3 rounded-md bg-gradient-to-r from-emerald-950/80 via-gray-800 to-rose-950/80 relative overflow-hidden ring-1 ring-gray-600/30">
                                     <div
-                                        className="absolute top-0 bottom-0 w-1 rounded-sm bg-[#2962FF] shadow-[0_0_10px_rgba(41,98,255,0.9),0_0_4px_rgba(255,255,255,0.5)]"
+                                        className="absolute top-0 bottom-0 w-1 rounded-sm bg-[#D1D5DB] shadow-[0_0_10px_rgba(209,213,219,0.9),0_0_4px_rgba(255,255,255,0.5)]"
                                         style={{ left: `${rangePct}%`, transform: "translateX(-50%)" }}
                                     />
                                 </div>
-                                <div className="text-[10px] text-gray-400 mt-2 text-center font-medium">
+                                <div className="text-xs text-[#6E7681] mt-2 text-center font-medium">
                                     Close within bar range
                                 </div>
                             </div>
@@ -666,7 +666,7 @@ export function SymbolDetailPanel({
 
                 {/* Technical snapshot */}
                 <Card title="Technical snapshot">
-                    <p className="text-[10px] text-gray-300 mb-3 leading-snug rounded-md border border-gray-600/35 bg-black/30 px-2.5 py-2">
+                    <p className="text-xs text-[#8B949E] mb-3 leading-snug rounded-md border border-[#30363D]/35 bg-black/30 px-2.5 py-2">
                         Uses the same series as the main chart at{" "}
                         <span className="font-bold text-[#7aa7ff] tabular-nums">{chartInterval}</span>.
                     </p>
@@ -676,8 +676,8 @@ export function SymbolDetailPanel({
                             value={
                                 technical.rsi != null ? (
                                     <span>
-                                        <span className="text-white">{technical.rsi.toFixed(1)}</span>{" "}
-                                        <span className="text-gray-400 text-[11px] font-medium">({rsiLabel})</span>
+                                        <span className="text-[#E6EDF3]">{technical.rsi.toFixed(1)}</span>{" "}
+                                        <span className="text-[#6E7681] text-xs font-medium">({rsiLabel})</span>
                                     </span>
                                 ) : (
                                     "—"
@@ -697,7 +697,7 @@ export function SymbolDetailPanel({
 
                 {/* Seasonals — avg monthly % by calendar month across loaded history */}
                 <Card title="Seasonals">
-                    <p className="text-[10px] text-gray-400 mb-2.5 leading-snug">
+                    <p className="text-xs text-[#8B949E] mb-2.5 leading-snug">
                         TradingView-style: compare cumulative % return by calendar day for the most recent 3 years.
                     </p>
                     <SeasonalsYearCompareChart lines={seasonalLines} />

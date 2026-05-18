@@ -1,10 +1,16 @@
-import React, { useState } from 'react';
+import React, { forwardRef, useState, useImperativeHandle } from 'react';
 
 export interface IndicatorConfig {
     id: string;
     type: 'overlay' | 'oscillator';
     name: string;
     params: Record<string, unknown>;
+}
+
+export interface IndicatorBarHandle {
+    openModal: () => void;
+    closeModal: () => void;
+    closeAll: () => void;
 }
 
 export const availableIndicators: {
@@ -30,10 +36,20 @@ interface IndicatorBarProps {
     onChange: React.Dispatch<React.SetStateAction<IndicatorConfig[]>>;
 }
 
-export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, onChange }) => {
+export const IndicatorBar = forwardRef<IndicatorBarHandle, IndicatorBarProps>(({ activeIndicators, onChange }, ref) => {
     const [isOverlayMenuOpen, setIsOverlayMenuOpen] = useState(false);
     const [isAllIndicatorsModalOpen, setIsAllIndicatorsModalOpen] = useState(false);
     const [editingIndicator, setEditingIndicator] = useState<IndicatorConfig | null>(null);
+
+    useImperativeHandle(ref, () => ({
+        openModal: () => setIsAllIndicatorsModalOpen(true),
+        closeModal: () => setIsAllIndicatorsModalOpen(false),
+        closeAll: () => {
+            setIsAllIndicatorsModalOpen(false);
+            setIsOverlayMenuOpen(false);
+            setEditingIndicator(null);
+        },
+    }));
 
     const toggleIndicator = (id: string, type: 'overlay' | 'oscillator', defaultParams: Record<string, unknown>) => {
         const isActive = activeIndicators.some(ind => ind.id === id);
@@ -52,7 +68,7 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
 
     return (
         <>
-            <div className="flex items-center bg-[#131722] text-gray-400 text-[10px] select-none overflow-x-auto scrollbar-none border-t border-gray-800 h-7 shrink-0 relative flex-wrap sm:flex-nowrap">
+            <div className="flex items-center bg-[#0D1117] text-[#8B949E] text-[10px] select-none overflow-x-auto scrollbar-none border-t border-[#30363D] h-7 shrink-0 relative flex-wrap sm:flex-nowrap">
                 <div className="indicator-list flex items-center px-1 w-full relative">
                     <ul className="main flex items-center gap-3 whitespace-nowrap mr-8">
                         {availableIndicators.overlay.map(ind => {
@@ -60,7 +76,7 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                             return (
                                 <li
                                     key={ind.id}
-                                    className={`cursor-pointer transition-colors ${isActive ? 'text-[#2962FF] font-bold' : 'hover:text-[#2962FF]'}`}
+                                    className={`cursor-pointer transition-colors ${isActive ? 'text-[#D1D5DB] font-bold' : 'hover:text-[#D1D5DB]'}`}
                                     onClick={() => toggleIndicator(ind.id, 'overlay', ind.defaultParams)}
                                 >
                                     {ind.name}
@@ -81,14 +97,14 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                             {isOverlayMenuOpen && (
                                 <>
                                     <div className="fixed inset-0 z-40" onClick={() => setIsOverlayMenuOpen(false)} />
-                                    <div className="absolute top-full left-0 mt-2 bg-[#1E222D] border border-gray-700 rounded shadow-2xl p-2 z-50 min-w-[150px]">
+                                    <div className="absolute top-full left-0 mt-2 bg-[#161B22] border border-[#21262D] rounded shadow-2xl p-2 z-50 min-w-[150px]">
                                         <div className="text-[10px] text-gray-500 font-bold px-2 py-1 mb-1 uppercase">Main Overlays</div>
                                         {availableIndicators.overlay.map(ind => {
                                             const isActive = activeIndicators.some(active => active.id === ind.id);
                                             return (
                                                 <div
                                                     key={`menu-${ind.id}`}
-                                                    className={`px-3 py-2 cursor-pointer rounded hover:bg-gray-700 flex justify-between items-center ${isActive ? 'text-[#2962FF]' : 'text-gray-300'}`}
+                                                    className={`px-3 py-2 cursor-pointer rounded hover:bg-gray-700 flex justify-between items-center ${isActive ? 'text-[#D1D5DB]' : 'text-gray-300'}`}
                                                     onClick={() => {
                                                         toggleIndicator(ind.id, 'overlay', ind.defaultParams);
                                                         setIsOverlayMenuOpen(false);
@@ -114,7 +130,7 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                             return (
                                 <li
                                     key={ind.id}
-                                    className={`cursor-pointer transition-colors ${isActive ? 'text-[#2962FF] font-bold' : 'hover:text-[#2962FF]'}`}
+                                    className={`cursor-pointer transition-colors ${isActive ? 'text-[#D1D5DB] font-bold' : 'hover:text-[#D1D5DB]'}`}
                                     onClick={() => toggleIndicator(ind.id, 'oscillator', ind.defaultParams)}
                                 >
                                     {ind.name}
@@ -138,8 +154,8 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
             {/* Central Modal for All Indicators */}
             {isAllIndicatorsModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm" onClick={() => setIsAllIndicatorsModalOpen(false)}>
-                    <div className="bg-[#1E222D] border border-gray-700 rounded-lg shadow-2xl w-[600px] max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
-                        <div className="flex justify-between items-center p-4 border-b border-gray-800 shrink-0">
+                    <div className="bg-[#161B22] border border-[#21262D] rounded-lg shadow-2xl w-[600px] max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-center p-4 border-b border-[#30363D] shrink-0">
                             <h3 className="text-white font-bold">Indicators Configuration</h3>
                             <button onClick={() => setIsAllIndicatorsModalOpen(false)} className="text-gray-400 hover:text-white transition-colors text-lg">✕</button>
                         </div>
@@ -154,11 +170,11 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                                         return (
                                             <div key={`modal-${ind.id}`} className="flex items-center gap-1">
                                                 <button
-                                                    className={`flex-1 flex items-center justify-between p-3 rounded text-left border ${isActive ? 'bg-[#2962FF]/10 border-[#2962FF] text-[#2962FF]' : 'bg-[#131722] border-gray-700 text-gray-300 hover:border-gray-500'}`}
+                                                    className={`flex-1 flex items-center justify-between p-3 rounded text-left border ${isActive ? 'bg-[#D1D5DB]/10 border-[#D1D5DB] text-[#D1D5DB]' : 'bg-[#131722] border-gray-700 text-gray-300 hover:border-gray-500'}`}
                                                     onClick={() => toggleIndicator(ind.id, 'overlay', ind.defaultParams)}
                                                 >
                                                     <span className="font-bold text-sm">{ind.name}</span>
-                                                    <div className={`w-4 h-4 rounded border flex items-center justify-center ${isActive ? 'bg-[#2962FF] border-[#2962FF]' : 'border-gray-600'}`}>
+                                                    <div className={`w-4 h-4 rounded border flex items-center justify-center ${isActive ? 'bg-[#D1D5DB] border-[#D1D5DB]' : 'border-gray-600'}`}>
                                                         {isActive && <span className="text-white text-xs leading-none">✓</span>}
                                                     </div>
                                                 </button>
@@ -187,11 +203,11 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                                         return (
                                             <div key={`modal-${ind.id}`} className="flex items-center gap-1">
                                                 <button
-                                                    className={`flex-1 flex items-center justify-between p-3 rounded text-left border ${isActive ? 'bg-[#2962FF]/10 border-[#2962FF] text-[#2962FF]' : 'bg-[#131722] border-gray-700 text-gray-300 hover:border-gray-500'}`}
+                                                    className={`flex-1 flex items-center justify-between p-3 rounded text-left border ${isActive ? 'bg-[#D1D5DB]/10 border-[#D1D5DB] text-[#D1D5DB]' : 'bg-[#131722] border-gray-700 text-gray-300 hover:border-gray-500'}`}
                                                     onClick={() => toggleIndicator(ind.id, 'oscillator', ind.defaultParams)}
                                                 >
                                                     <span className="font-bold text-sm">{ind.name}</span>
-                                                    <div className={`w-4 h-4 rounded border flex items-center justify-center ${isActive ? 'bg-[#2962FF] border-[#2962FF]' : 'border-gray-600'}`}>
+                                                    <div className={`w-4 h-4 rounded border flex items-center justify-center ${isActive ? 'bg-[#D1D5DB] border-[#D1D5DB]' : 'border-gray-600'}`}>
                                                         {isActive && <span className="text-white text-xs leading-none">✓</span>}
                                                     </div>
                                                 </button>
@@ -218,8 +234,8 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
             {/* Sub-Modal: Edit Indicator Parameters */}
             {editingIndicator && (
                 <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center backdrop-blur-sm" onClick={() => setEditingIndicator(null)}>
-                    <div className="bg-[#1E222D] border border-gray-700 rounded-lg shadow-2xl w-[320px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
-                        <div className="flex justify-between items-center p-4 border-b border-gray-800 shrink-0">
+                    <div className="bg-[#161B22] border border-[#21262D] rounded-lg shadow-2xl w-[320px] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-center p-4 border-b border-[#30363D] shrink-0">
                             <h3 className="text-white font-bold">{editingIndicator.name} Settings</h3>
                             <button onClick={() => setEditingIndicator(null)} className="text-gray-400 hover:text-white transition-colors text-lg">✕</button>
                         </div>
@@ -232,7 +248,7 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                                         <input
                                             type="text"
                                             defaultValue={Array.isArray(typedValue) ? typedValue.join(',') : typedValue.toString()}
-                                            className="bg-[#131722] border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#2962FF] transition-colors"
+                                            className="bg-[#131722] border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#D1D5DB] transition-colors"
                                             onBlur={(e) => {
                                                 const valStr = e.target.value.trim();
                                                 const newParams = { ...editingIndicator.params };
@@ -263,11 +279,12 @@ export const IndicatorBar: React.FC<IndicatorBarProps> = ({ activeIndicators, on
                         </div>
                         <div className="p-4 border-t border-gray-800 flex justify-end gap-2 bg-[#131722]/50">
                             <button onClick={() => setEditingIndicator(null)} className="px-4 py-2 rounded text-sm font-bold text-gray-400 hover:text-white hover:bg-gray-800 transition-colors">Cancel</button>
-                            <button onClick={() => handleSaveParams(editingIndicator.params)} className="px-4 py-2 rounded text-sm font-bold text-white bg-[#2962FF] hover:bg-blue-500 transition-colors">Apply</button>
+                            <button onClick={() => handleSaveParams(editingIndicator.params)} className="px-4 py-2 rounded text-sm font-bold text-white bg-[#D1D5DB] hover:bg-[#9CA3AF] transition-colors">Apply</button>
                         </div>
                     </div>
                 </div>
             )}
         </>
     );
-};
+});
+IndicatorBar.displayName = 'IndicatorBar';
