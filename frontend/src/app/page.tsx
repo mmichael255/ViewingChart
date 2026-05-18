@@ -3,7 +3,6 @@
 import { ChartComponent } from '@/components/ChartComponent';
 import { PriceHighlight } from '@/components/Highlighting';
 import { IndicatorBar, IndicatorConfig, type IndicatorBarHandle } from '@/components/IndicatorBar';
-import { ChatWidget, type ChatWidgetHandle } from '@/components/ChatWidget';
 import { BottomIntervalBar } from '@/components/BottomIntervalBar';
 import { useMarketData } from '@/hooks/useMarketData';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
@@ -20,6 +19,9 @@ import { fetchJson } from '@/lib/api';
 import type { WatchlistSummary } from '@/components/WatchlistSidebar';
 import type { WatchlistItem } from '@/types/market';
 import { UserMenu } from '@/components/UserMenu';
+import { MacroBar } from '@/components/MacroBar';
+import { AgentPanel } from '@/components/AgentPanel';
+import { NewsFeed } from '@/components/NewsFeed';
 import { formatCountdownMs, useCountdownMs } from '@/hooks/useCountdown';
 import { useResizable } from '@/hooks/useResizable';
 import { ResizeHandle } from '@/components/ResizeHandle';
@@ -130,7 +132,6 @@ export default function Home() {
   const [showAllIntervals, setShowAllIntervals] = useState(false);
   const intervalDropdownRef = useRef<HTMLDivElement>(null);
   const indicatorBarRef = useRef<IndicatorBarHandle>(null);
-  const chatWidgetRef = useRef<ChatWidgetHandle>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -498,7 +499,6 @@ export default function Home() {
     'Ctrl+7': () => handleIntervalChange('1w'),
     'Ctrl+8': () => handleIntervalChange('1M'),
     'Ctrl+i': () => indicatorBarRef.current?.openModal(),
-    'Ctrl+Shift+c': () => chatWidgetRef.current?.toggle(),
     'Ctrl+Shift+]': () => {
       const idx = flatWatchlist.findIndex(i => i.sym === symbol && i.type === assetType);
       if (idx >= 0 && idx < flatWatchlist.length - 1) {
@@ -596,9 +596,15 @@ export default function Home() {
         </div>
       </header>
 
-      {/* ── Body ── */}
+      {/* ── Macro Strip ── */}
+      <MacroBar />
+
+      {/* ── Body: 3-column layout ── */}
       <div className="flex flex-1 overflow-hidden h-full p-1 relative">
-        {/* ── Main Chart Wrapper ── */}
+        {/* ── Agent Panel (left) ── */}
+        <AgentPanel />
+
+        {/* ── Main Chart Wrapper (center) ── */}
         <main className="flex-1 flex h-full overflow-hidden relative border border-gray-800 bg-[#1E222D]">
           {/* LEFT Drawing Toolbar */}
           <div className="w-10 flex flex-col items-center border-r border-gray-800 bg-[#1E222D] py-2 gap-2 z-30 shrink-0">
@@ -775,6 +781,9 @@ export default function Home() {
               <button className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors">📷</button>
             </div>
 
+            {/* ── Macro Bar ── */}
+            <MacroBar />
+
             {/* Chart Canvas Area */}
             <div className="flex-1 flex flex-col relative bg-[#1E222D] overflow-hidden min-h-0">
               {isLoading && (
@@ -925,7 +934,11 @@ export default function Home() {
       )}
 
       <KeyboardShortcutsHelp isOpen={showShortcutsHelp} onClose={() => setShowShortcutsHelp(false)} />
-      <ChatWidget ref={chatWidgetRef} chartData={chartData} />
+
+      {/* ── Bottom News Feed ── */}
+      <div className="shrink-0 border-t border-[#30363D] bg-[#0D1117] overflow-hidden">
+        <NewsFeed compact />
+      </div>
     </div>
   );
 }
