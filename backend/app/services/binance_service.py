@@ -1,6 +1,7 @@
 import httpx
 import json
 import logging
+import time
 import redis.asyncio as redis
 from typing import List, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -401,6 +402,11 @@ class BinanceService:
                         "lastPrice": float(ticker["lastPrice"]),
                         "priceChange": float(ticker["priceChange"]),
                         "priceChangePercent": float(ticker["priceChangePercent"]),
+                        "highPrice": float(ticker.get("highPrice", 0)),
+                        "lowPrice": float(ticker.get("lowPrice", 0)),
+                        "volume": float(ticker.get("volume", 0)),
+                        "quoteVolume": float(ticker.get("quoteVolume", 0)),
+                        "openPrice": float(ticker.get("openPrice", 0)),
                     }
                     result[sym] = ticker_data
                     pipe.hset("binance:tickers", sym, json.dumps(ticker_data))
@@ -424,6 +430,11 @@ class BinanceService:
                         "lastPrice": float(ticker["lastPrice"]),
                         "priceChange": float(ticker["priceChange"]),
                         "priceChangePercent": float(ticker["priceChangePercent"]),
+                        "highPrice": float(ticker.get("highPrice", 0)),
+                        "lowPrice": float(ticker.get("lowPrice", 0)),
+                        "volume": float(ticker.get("volume", 0)),
+                        "quoteVolume": float(ticker.get("quoteVolume", 0)),
+                        "openPrice": float(ticker.get("openPrice", 0)),
                     }
                     result[sym] = ticker_data
                     pipe.hset("binance:tickers", sym, json.dumps(ticker_data))

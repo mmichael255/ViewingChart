@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
     from app.services.websocket_manager import manager
     from app.services.binance_service import binance_service
     from app.services.stock_service import stock_service
+    from app.services.coingecko_provider import coingecko_provider
 
     # Validate secrets and log config summary
     validate_secrets()
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
         scheduler_task.cancel()
     await binance_service.close()
     await stock_service.close()
+    await coingecko_provider.close()
     logger.info("Shutdown complete.")
 
 

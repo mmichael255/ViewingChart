@@ -1,0 +1,1035 @@
+"use client";
+
+import { Suspense, useState, useRef, useMemo, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
+import { ChartComponent } from "@/components/ChartComponent";
+import { PriceHighlight } from "@/components/Highlighting";
+import { IndicatorBar } from "@/components/IndicatorBar";
+import type { IndicatorConfig, IndicatorBarHandle } from "@/components/IndicatorBar";
+import { BottomIntervalBar } from "@/components/BottomIntervalBar";
+import { useMarketData } from "@/hooks/useMarketData";
+import type { CandlestickData, Time } from "lightweight-charts";
+import type { KlineData, TickerData } from "@/types/market";
+import type { DrawingToolType } from "@/drawing";
+import { WatchlistSidebar } from "@/components/WatchlistSidebar";
+import { SymbolSearch } from "@/components/SymbolSearch";
+import type { WatchlistSummary } from "@/components/WatchlistSidebar";
+import type { WatchlistItem } from "@/types/market";
+import { UserMenu } from "@/components/UserMenu";
+import { API_URL } from "@/config";
+import { buildPrePostSegments } from "@/lib/prepost";
+import { formatCountdownMs, useCountdownMs } from "@/hooks/useCountdown";
+import { getAccessToken } from "@/lib/auth";
+import { fetchJson } from "@/lib/api";
+import { useResizable } from "@/hooks/useResizable";
+import { ResizeHandle } from "@/components/ResizeHandle";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { KeyboardShortcutsHelp } from "@/components/KeyboardShortcutsHelp";
+import Link from "next/link";
+
+const INITIAL_CRYPTO_WATCHLIST = [
+  { sym: "BTCUSDT", label: "BTC", sub: "Bitcoin", source: "Binance" },
+  { sym: "ETHUSDT", label: "ETH", sub: "Ethereum", source: "Binance" },
+  { sym: "SOLUSDT", label: "SOL", sub: "Solana", source: "Binance" },
+  { sym: "XAUUSDT", label: "XAU", sub: "Gold", source: "Binance Futures" },
+  { sym: "XAGUSDT", label: "XAG", sub: "Silver", source: "Binance Futures" },
+];
+
+const STOCK_WATCHLIST = [
+  { sym: "NVDA", label: "NVDA", sub: "NVIDIA", source: "Yahoo Finance" },
+  { sym: "GOOG", label: "GOOG", sub: "Alphabet Inc.", source: "Yahoo Finance" },
+  { sym: "TSLA", label: "TSLA", sub: "Tesla Inc.", source: "Yahoo Finance" },
+  { sym: "AAPL", label: "AAPL", sub: "Apple Inc.", source: "Yahoo Finance" },
+];
+
+const CRYPTO_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"];
+const STOCK_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"];
+
+const INTERVAL_SECONDS: Record<string, number> = {
+  "1m": 60,
+  "3m": 180,
+  "5m": 300,
+  "15m": 900,
+  "30m": 1800,
+  "1h": 3600,
+  "4h": 14400,
+  "1d": 86400,
+  "1w": 604800,
+  "1M": 30 * 86400,
+};
+
+const sessionLabel: Record<string, string> = {
+  pre: "Pre",
+  regular: "Regular",
+  post: "Post",
+  overnight: "Overnight",
+  closed: "Closed",
+};
+
+type ApiWatchlistItem = {
+  id: number;
+  sym: string;
+  asset_type: "crypto" | "stock";
+  position: number;
+  exchange?: string | null;
+  source?: string | null;
+  label?: string | null;
+  sub?: string | null;
+};
+
+function formatEtTime(ts?: number): string {
+  if (!ts) return "";
+  return new Date(ts * 1000).toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  });
+}
+
+const ToolIcon = ({
+  icon,
+  tooltip,
+  isActive,
+  onClick,
+}: {
+  icon: string;
+  tooltip: string;
+  isActive?: boolean;
+  onClick?: () => void;
+}) => (
+  <button
+    title={tooltip}
+    onClick={onClick}
+    className={`w-7 h-7 flex items-center justify-center rounded transition-colors text-xs ${
+      isActive
+        ? "text-[#D1D5DB] bg-[#D1D5DB]/10"
+        : "text-gray-400 hover:text-[#D1D5DB] hover:bg-[#D1D5DB]/10"
+    }`}
+  >
+    {icon}
+  </button>
+);
+
+const DRAWING_TOOLS: { icon: string; tooltip: string; id: DrawingToolType }[] = [
+  { icon: "✜", tooltip: "Crosshair", id: "crosshair" },
+  { icon: "／", tooltip: "Trend Line", id: "trendline" },
+  { icon: "—", tooltip: "Horizontal Line", id: "horizontal_line" },
+  { icon: "|", tooltip: "Vertical Line", id: "vertical_line" },
+  { icon: "↗", tooltip: "Ray", id: "ray" },
+  { icon: "⑃", tooltip: "Parallel Channel", id: "parallel_channel" },
+  { icon: "F", tooltip: "Fib Retracement", id: "fib_retracement" },
+  { icon: "⬜", tooltip: "Rectangle", id: "rectangle" },
+  { icon: "📏", tooltip: "Measure", id: "measure" },
+];
+
+function ChartContent() {
+  const searchParams = useSearchParams();
+  const initialSymbol = searchParams.get("symbol") ?? "BTCUSDT";
+  const initialInterval = searchParams.get("interval") ?? "4h";
+  const initialType = searchParams.get("type") ?? (initialSymbol.includes("USDT") ? "crypto" : "stock");
+
+  const [symbol, setSymbol] = useState(initialSymbol);
+  const [chartInterval, setChartInterval] = useState(initialInterval);
+  const [assetType, setAssetType] = useState(initialType);
+  const [activeTool, setActiveTool] = useState<DrawingToolType>("crosshair");
+  const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([
+    { id: "ma", type: "overlay", name: "MA", params: { periods: [7, 25, 99] } },
+    { id: "volume", type: "oscillator", name: "VOLUME", params: {} },
+  ]);
+  const indicatorBarRef = useRef<IndicatorBarHandle>(null);
+
+  const [quickIntervals, setQuickIntervals] = useState(["15m", "1h", "4h", "1d", "1w"]);
+  const [showAllIntervals, setShowAllIntervals] = useState(false);
+  const intervalDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Watchlist state
+  const [watchlists, setWatchlists] = useState<WatchlistSummary[] | null>(null);
+  const [selectedWatchlistId, setSelectedWatchlistId] = useState<number | null>(null);
+  const [orderedWatchlistItems, setOrderedWatchlistItems] = useState<ApiWatchlistItem[] | null>(null);
+  const [cryptoWatchlist, setCryptoWatchlist] = useState<WatchlistItem[]>(INITIAL_CRYPTO_WATCHLIST);
+  const [stockWatchlist, setStockWatchlist] = useState<WatchlistItem[]>(STOCK_WATCHLIST);
+  const [searchModalMode, setSearchModalMode] = useState<"closed" | "search" | "add">("closed");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+
+  // Ticker data
+  const [watchlistTicker, setWatchlistTicker] = useState<TickerData | undefined>(undefined);
+  const [extraTickerBySymbol, setExtraTickerBySymbol] = useState<Record<string, TickerData>>({});
+
+  // Auth state
+  const [token, setToken] = useState<string | null>(() => getAccessToken());
+  const [me, setMe] = useState<{ role?: string | null } | null>(null);
+
+  // Sidebar resize
+  const { size: sidebarWidth, isDragging: isSidebarDragging, handleProps: sidebarHandleProps } = useResizable({
+    initialSize: 320,
+    minSize: 200,
+    maxSize: 600,
+    direction: "horizontal",
+  });
+
+  const {
+    data,
+    isLoading,
+    wsStatus,
+    lastStockRestSuccessAtMs,
+    lastStockRestErrorAtMs,
+    stockRefreshIntervalMs,
+  } = useMarketData(symbol, chartInterval, assetType);
+
+  const allIntervals = assetType === "crypto" ? CRYPTO_INTERVALS : STOCK_INTERVALS;
+  const extraTicker = extraTickerBySymbol[symbol];
+  const selectedTicker = watchlistTicker ?? extraTicker;
+
+  // Last candle close (for title and header display)
+  const lastClose = useMemo(() => {
+    if (!data?.length) return null;
+    const c = data[data.length - 1].close;
+    const n = typeof c === "number" ? c : Number(c);
+    return Number.isFinite(n) ? n : null;
+  }, [data]);
+
+  // Document title
+  useEffect(() => {
+    if (lastClose != null) {
+      document.title = `${lastClose.toFixed(2)} · ${symbol} · ViewingChart`;
+    } else {
+      document.title = "ViewingChart";
+    }
+  }, [lastClose, symbol]);
+
+  // Live closing of forming candle for stocks (uses ticker lastPrice)
+  // Avoid calling Date.now() during render (lint: react-hooks/purity).
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const id = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const chartData = useMemo(() => {
+    if (!data || !Array.isArray(data) || data.length === 0) return data;
+    if (assetType !== "stock") return data;
+    if (selectedTicker?.session && selectedTicker.session !== "regular") return data;
+    const lastPrice = selectedTicker?.lastPrice;
+    if (typeof lastPrice !== "number" || !Number.isFinite(lastPrice)) return data;
+
+    const last = data[data.length - 1] as KlineData;
+    const tLast = Number(last.time);
+    const sec = INTERVAL_SECONDS[chartInterval] ?? 0;
+    if (!sec || !Number.isFinite(tLast)) return data;
+
+    if (nowSec < tLast || nowSec >= tLast + sec) return data;
+
+    const patchedLast: KlineData = {
+      ...last,
+      close: lastPrice,
+      high: Math.max(Number(last.high ?? lastPrice), lastPrice),
+      low: Math.min(Number(last.low ?? lastPrice), lastPrice),
+    };
+    const out = data.slice();
+    out[out.length - 1] = patchedLast;
+    return out;
+  }, [data, assetType, selectedTicker?.lastPrice, selectedTicker?.session, chartInterval, nowSec]);
+
+  // Pre/post segments for stocks
+  const prePostSegments = useMemo(
+    () => (assetType === "stock" ? buildPrePostSegments(selectedTicker) : []),
+    [assetType, selectedTicker],
+  );
+
+  // Stock kline countdown
+  const stockKlineNextAtMs =
+    assetType === "stock" && lastStockRestSuccessAtMs
+      ? lastStockRestSuccessAtMs + (stockRefreshIntervalMs ?? 60_000)
+      : null;
+  const stockKlineRemainingMs = useCountdownMs(stockKlineNextAtMs);
+  const stockKlineCountdown = stockKlineNextAtMs ? formatCountdownMs(stockKlineRemainingMs) : null;
+  const stockKlineHasError =
+    assetType === "stock" &&
+    !!lastStockRestErrorAtMs &&
+    (!lastStockRestSuccessAtMs || lastStockRestErrorAtMs > lastStockRestSuccessAtMs);
+
+  // Flat watchlist for keyboard cycling
+  const flatWatchlist = useMemo(() => {
+    if (orderedWatchlistItems && orderedWatchlistItems.length > 0) {
+      return orderedWatchlistItems.map((i) => ({ sym: i.sym, type: i.asset_type }));
+    }
+    return [
+      ...cryptoWatchlist.map((i) => ({ sym: i.sym, type: "crypto" as const })),
+      ...stockWatchlist.map((i) => ({ sym: i.sym, type: "stock" as const })),
+    ];
+  }, [orderedWatchlistItems, cryptoWatchlist, stockWatchlist]);
+
+  const handleSymbolChange = (newSymbol: string, type: string) => {
+    setSymbol(newSymbol);
+    setAssetType(type);
+    if (type !== assetType) {
+      setChartInterval(type === "crypto" ? "1d" : "1h");
+    }
+  };
+
+  const handleSelectedTickerChange = useCallback((ticker: TickerData | undefined) => {
+    setWatchlistTicker(ticker);
+  }, []);
+
+  /** Stable reference for sidebar — avoids resetting edit order every parent render. */
+  const sidebarOrderedItems = useMemo((): WatchlistItem[] | undefined => {
+    if (!orderedWatchlistItems?.length) return undefined;
+    return orderedWatchlistItems.map((i) => ({
+      id: i.id,
+      sym: i.sym,
+      label: i.label ?? i.sym,
+      sub: i.sub ?? (i.asset_type === "stock" ? "Stock/FX" : "Crypto"),
+      source: i.source ?? undefined,
+      asset_type: i.asset_type,
+      position: i.position,
+    }));
+  }, [orderedWatchlistItems]);
+
+  // ── Auth effects ──
+
+  const handleAuthChange = useCallback(() => {
+    setToken(getAccessToken());
+  }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setMe(null);
+      return;
+    }
+    (async () => {
+      try {
+        const data = await fetchJson<{ role?: string | null }>("/me", { auth: true });
+        setMe(data);
+      } catch {
+        setMe(null);
+      }
+    })();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) {
+      setWatchlists(null);
+      setSelectedWatchlistId(null);
+      setCryptoWatchlist(INITIAL_CRYPTO_WATCHLIST);
+      setStockWatchlist(STOCK_WATCHLIST);
+      return;
+    }
+
+    (async () => {
+      try {
+        const wls = await fetchJson<WatchlistSummary[]>("/watchlists", { auth: true });
+        setWatchlists(wls);
+        const def = wls.find((w) => w.is_default) ?? wls[0];
+        if (def) setSelectedWatchlistId(def.id);
+      } catch {
+        setWatchlists(null);
+        setSelectedWatchlistId(null);
+      }
+    })();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || !selectedWatchlistId) return;
+    (async () => {
+      try {
+        const items = await fetchJson<ApiWatchlistItem[]>(
+          `/watchlists/${selectedWatchlistId}/items`,
+          { auth: true },
+        );
+        setOrderedWatchlistItems(items);
+        const crypto: WatchlistItem[] = [];
+        const stocks: WatchlistItem[] = [];
+        for (const i of items) {
+          const mapped: WatchlistItem = {
+            id: i.id,
+            sym: i.sym,
+            label: i.label ?? i.sym,
+            sub: i.sub ?? (i.asset_type === "stock" ? "Stock/FX" : "Crypto"),
+            source: i.source ?? undefined,
+            asset_type: i.asset_type,
+            position: i.position,
+          };
+          if (i.asset_type === "stock") stocks.push(mapped);
+          else crypto.push(mapped);
+        }
+        setCryptoWatchlist(crypto);
+        setStockWatchlist(stocks);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [token, selectedWatchlistId]);
+
+  // One-shot REST fetch for stock tickers the sidebar doesn't know about
+  useEffect(() => {
+    if (assetType !== "stock" || !symbol) return;
+    if (watchlistTicker) return;
+    if (extraTickerBySymbol[symbol]) return;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_URL}/market/tickers?stock_symbols=${encodeURIComponent(symbol)}`,
+          { signal: controller.signal },
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as Record<string, TickerData>;
+        const t = data?.[symbol];
+        if (t) setExtraTickerBySymbol((prev) => ({ ...prev, [symbol]: t }));
+      } catch (err) {
+        if ((err as Error)?.name === "AbortError") return;
+        console.debug("[chart] ticker fetch failed", err);
+      }
+    })();
+    return () => {
+      controller.abort();
+    };
+  }, [assetType, symbol, watchlistTicker, extraTickerBySymbol]);
+
+  // ── CRUD functions ──
+
+  async function createWatchlist(name: string) {
+    if (!token) return;
+    const wl = await fetchJson<WatchlistSummary>("/watchlists", {
+      method: "POST",
+      auth: true,
+      body: JSON.stringify({ name, is_default: false }),
+    });
+    const wls = await fetchJson<WatchlistSummary[]>("/watchlists", { auth: true });
+    setWatchlists(wls);
+    setSelectedWatchlistId(wl.id);
+  }
+
+  async function renameWatchlist(name: string) {
+    if (!token || !selectedWatchlistId || !watchlists) return;
+    await fetchJson<WatchlistSummary>(`/watchlists/${selectedWatchlistId}`, {
+      method: "PATCH",
+      auth: true,
+      body: JSON.stringify({ name }),
+    });
+    const wls = await fetchJson<WatchlistSummary[]>("/watchlists", { auth: true });
+    setWatchlists(wls);
+  }
+
+  async function deleteWatchlist() {
+    if (!token || !selectedWatchlistId) return;
+    await fetchJson<void>(`/watchlists/${selectedWatchlistId}`, { method: "DELETE", auth: true });
+    const wls = await fetchJson<WatchlistSummary[]>("/watchlists", { auth: true });
+    setWatchlists(wls);
+    const def = wls.find((w) => w.is_default) ?? wls[0] ?? null;
+    setSelectedWatchlistId(def?.id ?? null);
+  }
+
+  async function removeItem(sym: string, itemType: string) {
+    if (!token || !selectedWatchlistId) return;
+    const target =
+      orderedWatchlistItems?.find(
+        (i) => i.sym === sym && i.asset_type === (itemType === "stock" ? "stock" : "crypto"),
+      ) ??
+      (
+        await fetchJson<ApiWatchlistItem[]>(`/watchlists/${selectedWatchlistId}/items`, { auth: true })
+      ).find((i) => i.sym === sym && i.asset_type === (itemType === "stock" ? "stock" : "crypto"));
+    if (!target) return;
+    await fetchJson<void>(`/watchlists/${selectedWatchlistId}/items/${target.id}`, {
+      method: "DELETE",
+      auth: true,
+    });
+    const refreshed = await fetchJson<ApiWatchlistItem[]>(
+      `/watchlists/${selectedWatchlistId}/items`,
+      { auth: true },
+    );
+    setOrderedWatchlistItems(refreshed);
+    const crypto: WatchlistItem[] = [];
+    const stocks: WatchlistItem[] = [];
+    for (const i of refreshed) {
+      const mapped: WatchlistItem = {
+        id: i.id,
+        sym: i.sym,
+        label: i.label ?? i.sym,
+        sub: i.sub ?? (i.asset_type === "stock" ? "Stock/FX" : "Crypto"),
+        source: i.source ?? undefined,
+        asset_type: i.asset_type,
+        position: i.position,
+      };
+      if (i.asset_type === "stock") stocks.push(mapped);
+      else crypto.push(mapped);
+    }
+    setCryptoWatchlist(crypto);
+    setStockWatchlist(stocks);
+  }
+
+  async function reorderWatchlistItemsByIds(itemIds: number[]) {
+    if (!token || !selectedWatchlistId) return;
+    await fetchJson<void>(`/watchlists/${selectedWatchlistId}/items/reorder`, {
+      method: "PUT",
+      auth: true,
+      body: JSON.stringify({ item_ids: itemIds }),
+    });
+    const refreshed = await fetchJson<ApiWatchlistItem[]>(
+      `/watchlists/${selectedWatchlistId}/items`,
+      { auth: true },
+    );
+    setOrderedWatchlistItems(refreshed);
+    const crypto: WatchlistItem[] = [];
+    const stocks: WatchlistItem[] = [];
+    for (const i of refreshed) {
+      const mapped: WatchlistItem = {
+        id: i.id,
+        sym: i.sym,
+        label: i.label ?? i.sym,
+        sub: i.sub ?? (i.asset_type === "stock" ? "Stock/FX" : "Crypto"),
+        source: i.source ?? undefined,
+        asset_type: i.asset_type,
+        position: i.position,
+      };
+      if (i.asset_type === "stock") stocks.push(mapped);
+      else crypto.push(mapped);
+    }
+    setCryptoWatchlist(crypto);
+    setStockWatchlist(stocks);
+  }
+
+  async function copyItemToWatchlist(itemId: number, destWatchlistId: number) {
+    if (!token || !selectedWatchlistId) return;
+    await fetchJson<void>(`/watchlists/${destWatchlistId}/items/copy`, {
+      method: "POST",
+      auth: true,
+      body: JSON.stringify({ from_watchlist_id: selectedWatchlistId, item_ids: [itemId] }),
+    });
+  }
+
+  // ── Interval handlers ──
+
+  const handleIntervalChange = (newInterval: string) => {
+    setChartInterval(newInterval);
+    setShowAllIntervals(false);
+  };
+
+  const handleQuickDragStart = (e: React.DragEvent, index: number) => {
+    e.dataTransfer.setData("text/plain", index.toString());
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleQuickDrop = (e: React.DragEvent, targetIndex: number) => {
+    e.preventDefault();
+    const sourceIndexStr = e.dataTransfer.getData("text/plain");
+    const sourceIndex = parseInt(sourceIndexStr, 10);
+    if (!isNaN(sourceIndex) && sourceIndex !== targetIndex) {
+      const newItems = [...quickIntervals];
+      const [movedItem] = newItems.splice(sourceIndex, 1);
+      newItems.splice(targetIndex, 0, movedItem);
+      setQuickIntervals(newItems);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const toggleQuickAccess = (interval: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const exists = quickIntervals.includes(interval);
+    if (exists) {
+      if (quickIntervals.length > 3) {
+        setQuickIntervals((prev) => prev.filter((i) => i !== interval));
+      }
+    } else {
+      if (quickIntervals.length < 5) {
+        setQuickIntervals((prev) => [...prev, interval]);
+      }
+    }
+  };
+
+  // Close interval dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (intervalDropdownRef.current && !intervalDropdownRef.current.contains(event.target as Node)) {
+        setShowAllIntervals(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Global keyboard shortcuts
+  useKeyboardShortcuts({
+    Escape: () => {
+      setSearchModalMode("closed");
+      setShowAllIntervals(false);
+      setShowShortcutsHelp(false);
+      setActiveTool("crosshair");
+      indicatorBarRef.current?.closeAll();
+    },
+    "/": () => setSearchModalMode("search"),
+    "Shift+/": () => setShowShortcutsHelp((v) => !v),
+    "Ctrl+b": () => setSidebarCollapsed((v) => !v),
+    "1": () => setActiveTool("crosshair"),
+    "2": () => setActiveTool("trendline"),
+    "3": () => setActiveTool("horizontal_line"),
+    "4": () => setActiveTool("vertical_line"),
+    "5": () => setActiveTool("ray"),
+    "6": () => setActiveTool("parallel_channel"),
+    "7": () => setActiveTool("fib_retracement"),
+    "8": () => setActiveTool("rectangle"),
+    "9": () => setActiveTool("measure"),
+    "Ctrl+1": () => handleIntervalChange("1m"),
+    "Ctrl+2": () => handleIntervalChange("5m"),
+    "Ctrl+3": () => handleIntervalChange("15m"),
+    "Ctrl+4": () => handleIntervalChange("1h"),
+    "Ctrl+5": () => handleIntervalChange("4h"),
+    "Ctrl+6": () => handleIntervalChange("1d"),
+    "Ctrl+7": () => handleIntervalChange("1w"),
+    "Ctrl+8": () => handleIntervalChange("1M"),
+    "Ctrl+i": () => indicatorBarRef.current?.openModal(),
+    "Ctrl+Shift+]": () => {
+      const idx = flatWatchlist.findIndex((i) => i.sym === symbol && i.type === assetType);
+      if (idx >= 0 && idx < flatWatchlist.length - 1) {
+        const next = flatWatchlist[idx + 1];
+        handleSymbolChange(next.sym, next.type);
+      }
+    },
+    "Ctrl+Shift+[": () => {
+      const idx = flatWatchlist.findIndex((i) => i.sym === symbol && i.type === assetType);
+      if (idx > 0) {
+        const prev = flatWatchlist[idx - 1];
+        handleSymbolChange(prev.sym, prev.type);
+      }
+    },
+  });
+
+  return (
+    <div className="flex flex-col h-screen bg-black text-[#E6EDF3] overflow-hidden">
+      {/* ── Global Header ── */}
+      <header className="flex items-center justify-between px-5 h-12 border-b border-[#30363D] bg-black shrink-0 z-40 relative">
+        <div className="flex items-center gap-2 w-1/4">
+          <Link href="/" className="text-[#E6EDF3] font-bold text-lg tracking-tight hover:text-white transition-colors">ViewingChart</Link>
+        </div>
+
+        <div className="flex-1 flex justify-center w-2/4">
+          <button
+            onClick={() => setSearchModalMode("search")}
+            className="w-72 bg-[#1E222D] border border-[#30363D] text-[#E6EDF3] placeholder-[#6E7681] py-2 text-sm rounded-full text-left pl-4 hover:border-[#D1D5DB] transition-colors flex items-center"
+          >
+            <span className="text-[#6E7681]">Search</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 justify-end w-1/4">
+          {me?.role === "superadmin" && (
+            <Link
+              href="/monitor"
+              className="text-xs text-[#6E7681] hover:text-[#8B949E] transition-colors"
+              title="Connection monitor"
+            >
+              Monitor
+            </Link>
+          )}
+          <UserMenu onAuthChange={handleAuthChange} />
+        </div>
+      </header>
+
+      {/* ── Body ── */}
+      <div className="flex flex-1 overflow-hidden h-full p-1 relative">
+        {/* ── Main Chart Wrapper ── */}
+        <main className="flex-1 flex h-full overflow-hidden relative border border-gray-800 bg-[#1E222D]">
+          {/* LEFT Drawing toolbar */}
+          <div className="w-10 flex flex-col items-center border-r border-[#30363D] bg-[#0D1117] py-2 gap-1.5 shrink-0">
+            {DRAWING_TOOLS.map((tool) => (
+              <ToolIcon
+                key={tool.id}
+                icon={tool.icon}
+                tooltip={tool.tooltip}
+                isActive={activeTool === tool.id}
+                onClick={() => setActiveTool(activeTool === tool.id ? "crosshair" : tool.id)}
+              />
+            ))}
+            <div className="flex-1" />
+            <ToolIcon
+              icon="🗑"
+              tooltip="Remove Selected"
+              onClick={() => {
+                window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+              }}
+            />
+          </div>
+
+          {/* Center Chart Column */}
+          <div className="flex-1 flex flex-col min-w-0">
+            {/* Chart Toolbar */}
+            <div className="flex items-center gap-3 px-4 h-11 border-b border-[#30363D] bg-[#1E222D] shrink-0 z-30">
+              <div className="flex items-center gap-2 shrink-0 min-w-0">
+                <span className="text-sm font-bold text-white tracking-tight">{symbol}</span>
+                {lastClose != null && (
+                  <PriceHighlight price={lastClose} className="text-sm font-bold tabular-nums" />
+                )}
+                {prePostSegments.length > 0 && (
+                  <span className="text-[10px] tabular-nums flex items-center gap-2 shrink-0">
+                    {prePostSegments.map((seg) => (
+                      <span
+                        key={seg.kind}
+                        className={
+                          seg.isActiveSession ? "text-blue-300 font-semibold" : "text-gray-400"
+                        }
+                      >
+                        {seg.label} {seg.price.toFixed(2)}
+                      </span>
+                    ))}
+                  </span>
+                )}
+                {assetType === "stock" && selectedTicker?.session && (
+                  (selectedTicker.session === "regular" ||
+                    selectedTicker.session === "closed" ||
+                    !prePostSegments.some((s) => s.isActiveSession))
+                ) && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-300 bg-blue-500/10 px-1.5 py-0.5 rounded">
+                    {sessionLabel[selectedTicker.session] ?? selectedTicker.session}
+                    {selectedTicker.asOf ? ` ${formatEtTime(selectedTicker.asOf)} ET` : ""}
+                  </span>
+                )}
+                {assetType === "stock" &&
+                  selectedTicker?.asOf &&
+                  (selectedTicker.session === "pre" ||
+                    selectedTicker.session === "post" ||
+                    selectedTicker.session === "overnight") &&
+                  prePostSegments.some((s) => s.isActiveSession) && (
+                    <span className="text-[10px] text-gray-500 tabular-nums">
+                      {formatEtTime(selectedTicker.asOf)} ET
+                    </span>
+                  )}
+                {selectedTicker?.isStale && (
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-yellow-300 bg-yellow-500/10 px-1.5 py-0.5 rounded">
+                    Stale
+                  </span>
+                )}
+                {wsStatus !== "connected" && (
+                  <span
+                    title={
+                      wsStatus === "reconnecting"
+                        ? "Reconnecting to live data..."
+                        : "Live data disconnected"
+                    }
+                    className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      wsStatus === "reconnecting"
+                        ? "bg-yellow-500/15 text-yellow-400 animate-pulse"
+                        : "bg-red-500/15 text-red-400"
+                    }`}
+                  >
+                    {wsStatus === "reconnecting" ? "Reconnecting" : "Offline"}
+                  </span>
+                )}
+                {assetType === "stock" && stockKlineCountdown && (
+                  <span
+                    title="Next REST kline refresh"
+                    className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-800/50 text-gray-300"
+                  >
+                    Fetch in <span className="tabular-nums">{stockKlineCountdown}</span>
+                  </span>
+                )}
+                {stockKlineHasError && (
+                  <span
+                    title="Last stock kline fetch failed"
+                    className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300"
+                  >
+                    Kline fetch failed
+                  </span>
+                )}
+              </div>
+
+              <div className="w-px h-5 bg-gray-700 mx-1" />
+
+              {/* Sortable Quick Access Interval Selector */}
+              <div className="flex items-center gap-1 relative">
+                {quickIntervals.map((int, index) => (
+                  <div
+                    key={int}
+                    draggable
+                    onDragStart={(e) => handleQuickDragStart(e, index)}
+                    onDrop={(e) => handleQuickDrop(e, index)}
+                    onDragOver={handleDragOver}
+                    className="cursor-move"
+                  >
+                    <button
+                      onClick={() => handleIntervalChange(int)}
+                      className={`px-2 py-1 rounded text-xs transition-colors whitespace-nowrap min-w-[2rem] text-center ${
+                        chartInterval === int
+                          ? "bg-[#D1D5DB] text-black font-semibold"
+                          : "text-gray-400 hover:text-white hover:bg-gray-700"
+                      }`}
+                    >
+                      {int}
+                    </button>
+                  </div>
+                ))}
+
+                <div className="relative ml-1" ref={intervalDropdownRef}>
+                  <button
+                    onClick={() => setShowAllIntervals(!showAllIntervals)}
+                    className={`px-2 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-gray-700 transition-colors ${
+                      showAllIntervals ? "bg-gray-700 text-white" : ""
+                    }`}
+                  >
+                    ⌄
+                  </button>
+
+                  {showAllIntervals && (
+                    <div className="absolute top-full left-0 mt-1 bg-[#1E222D] border border-gray-700 rounded shadow-2xl p-2 grid grid-cols-1 gap-0.5 z-50 min-w-[120px] max-h-[300px] overflow-y-auto">
+                      {allIntervals.map((int) => {
+                        const isInQuick = quickIntervals.includes(int);
+                        const canAdd = !isInQuick && quickIntervals.length < 5;
+                        const canRemove = isInQuick && quickIntervals.length > 3;
+
+                        return (
+                          <div
+                            key={int}
+                            className={`group flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer ${
+                              chartInterval === int ? "bg-[#D1D5DB]/10" : ""
+                            }`}
+                            onClick={() => handleIntervalChange(int)}
+                          >
+                            <span
+                              className={`text-[11px] ${
+                                chartInterval === int ? "text-[#D1D5DB] font-bold" : "text-gray-300"
+                              }`}
+                            >
+                              {int}
+                            </span>
+
+                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center">
+                              {isInQuick && canRemove && (
+                                <button
+                                  onClick={(e) => toggleQuickAccess(int, e)}
+                                  className="text-sm font-bold text-gray-400 hover:text-red-400 hover:bg-red-400/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
+                                  title="Remove from favorites"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                              {!isInQuick && canAdd && (
+                                <button
+                                  onClick={(e) => toggleQuickAccess(int, e)}
+                                  className="text-sm font-bold text-gray-400 hover:text-[#D1D5DB] hover:bg-[#D1D5DB]/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
+                                  title="Add to favorites"
+                                >
+                                  ＋
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Chart Canvas + bottom bars */}
+            <div className="flex-1 flex flex-col relative bg-[#1E222D] overflow-hidden min-h-0">
+              {isLoading && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#0D1117]/80">
+                  <div className="w-8 h-8 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+              <div className="flex-1 min-h-0 relative">
+                {chartData && (
+                  <ChartComponent
+                    data={chartData as unknown as CandlestickData<Time>[]}
+                    symbol={symbol}
+                    indicators={activeIndicators}
+                    activeTool={activeTool}
+                  />
+                )}
+              </div>
+
+              <div className="shrink-0 flex flex-col bg-[#131722]">
+                <IndicatorBar
+                  ref={indicatorBarRef}
+                  activeIndicators={activeIndicators}
+                  onChange={setActiveIndicators}
+                />
+                <BottomIntervalBar
+                  intervals={allIntervals}
+                  currentInterval={chartInterval}
+                  onIntervalChange={handleIntervalChange}
+                />
+              </div>
+            </div>
+          </div>
+        </main>
+
+        {/* Sidebar resize handle */}
+        {!sidebarCollapsed && (
+          <div
+            onMouseDown={sidebarHandleProps.onMouseDown}
+            className="w-1 shrink-0 cursor-col-resize bg-black hover:bg-black active:bg-black"
+          />
+        )}
+
+        {/* Watchlist sidebar */}
+        <div
+          className={`shrink-0 ${sidebarCollapsed ? "w-0 overflow-hidden" : ""}`}
+          style={sidebarCollapsed ? {} : { width: sidebarWidth }}
+        >
+          {sidebarCollapsed ? null : (
+            <WatchlistSidebar
+              watchlists={watchlists ?? undefined}
+              selectedWatchlistId={selectedWatchlistId}
+              onSelectWatchlist={(id) => setSelectedWatchlistId(id)}
+              onCreateWatchlist={token ? createWatchlist : undefined}
+              onRenameWatchlist={token ? renameWatchlist : undefined}
+              onDeleteWatchlist={token ? deleteWatchlist : undefined}
+              onRemoveItem={token ? removeItem : undefined}
+              orderedItems={sidebarOrderedItems}
+              onReorderItems={token ? reorderWatchlistItemsByIds : undefined}
+              onCopyItemToWatchlist={token ? copyItemToWatchlist : undefined}
+              cryptoWatchlist={cryptoWatchlist}
+              stockWatchlist={stockWatchlist}
+              symbol={symbol}
+              assetType={assetType}
+              chartInterval={chartInterval}
+              chartKlines={chartData}
+              chartKlinesLoading={isLoading}
+              mergedTicker={selectedTicker}
+              handleSymbolChange={handleSymbolChange}
+              setSearchModalMode={setSearchModalMode}
+              onSelectedTickerChange={handleSelectedTickerChange}
+            />
+          )}
+        </div>
+
+        {/* Sidebar collapse toggle */}
+        <button
+          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          className="absolute right-0 top-0 z-50 w-5 h-10 flex items-center justify-center bg-black border border-[#30363D] rounded-l text-[#8B949E] hover:text-[#E6EDF3] hover:bg-black transition-colors text-xs"
+          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {sidebarCollapsed ? "◀" : "▶"}
+        </button>
+      </div>
+
+      {/* ── Unified Search Modal ── */}
+      {searchModalMode !== "closed" && (
+        <div
+          className="absolute inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm"
+          onClick={() => setSearchModalMode("closed")}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setSearchModalMode("closed");
+          }}
+        >
+          <div
+            className="bg-black border border-[#21262D] rounded-lg shadow-2xl w-[500px] h-[500px] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center p-4 border-b border-[#30363D] shrink-0">
+              <h3 className="text-[#E6EDF3] font-bold">
+                {searchModalMode === "add" ? "Add Symbol to Watchlist" : "Search Symbol"}
+              </h3>
+              <button
+                onClick={() => setSearchModalMode("closed")}
+                className="text-[#8B949E] hover:text-[#E6EDF3] transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden relative">
+              <SymbolSearch
+                mode={searchModalMode}
+                onSelect={(sym, type, source) => {
+                  if (searchModalMode === "add") {
+                    if (token && selectedWatchlistId) {
+                      void (async () => {
+                        await fetchJson(`/watchlists/${selectedWatchlistId}/items`, {
+                          method: "POST",
+                          auth: true,
+                          body: JSON.stringify({
+                            sym,
+                            asset_type: type === "stock" ? "stock" : "crypto",
+                            source: source || (type === "stock" ? "Yahoo Finance" : "Binance"),
+                            label: type === "crypto" ? (sym.endsWith("USDT") ? sym.replace("USDT", "") : sym) : sym,
+                            sub: type === "stock" ? "Stock/FX" : "Crypto",
+                          }),
+                        });
+                        const items = await fetchJson<ApiWatchlistItem[]>(
+                          `/watchlists/${selectedWatchlistId}/items`,
+                          { auth: true },
+                        );
+                        setOrderedWatchlistItems(items);
+                        const crypto: WatchlistItem[] = [];
+                        const stocks: WatchlistItem[] = [];
+                        for (const i of items) {
+                          const mapped: WatchlistItem = {
+                            id: i.id,
+                            sym: i.sym,
+                            label: i.label ?? i.sym,
+                            sub: i.sub ?? (i.asset_type === "stock" ? "Stock/FX" : "Crypto"),
+                            source: i.source ?? undefined,
+                            asset_type: i.asset_type,
+                            position: i.position,
+                          };
+                          if (i.asset_type === "stock") stocks.push(mapped);
+                          else crypto.push(mapped);
+                        }
+                        setCryptoWatchlist(crypto);
+                        setStockWatchlist(stocks);
+                      })();
+                    } else {
+                      if (type === "crypto") {
+                        if (!cryptoWatchlist.find((i) => i.sym === sym)) {
+                          const label = sym.endsWith("USDT") ? sym.replace("USDT", "") : sym;
+                          setCryptoWatchlist((prev) => [
+                            ...prev,
+                            { sym, label, sub: "Crypto", source: source || "Binance" },
+                          ]);
+                        }
+                      } else {
+                        if (!stockWatchlist.find((i) => i.sym === sym)) {
+                          setStockWatchlist((prev) => [
+                            ...prev,
+                            {
+                              sym,
+                              label: sym,
+                              sub: "Stock/FX",
+                              source: source || "Yahoo Finance",
+                            },
+                          ]);
+                        }
+                      }
+                    }
+                  } else {
+                    handleSymbolChange(sym, type);
+                  }
+                  setSearchModalMode("closed");
+                }}
+                placeholder={
+                  searchModalMode === "add"
+                    ? "Search symbol to add..."
+                    : "Search symbol to view chart..."
+                }
+                className="w-full h-full"
+                autoFocus
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <KeyboardShortcutsHelp isOpen={showShortcutsHelp} onClose={() => setShowShortcutsHelp(false)} />
+    </div>
+  );
+}
+
+export default function ChartPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-screen items-center justify-center bg-black">
+          <div className="w-8 h-8 border-2 border-gray-600 border-t-transparent rounded-full animate-spin" />
+        </div>
+      }
+    >
+      <ChartContent />
+    </Suspense>
+  );
+}

@@ -389,6 +389,11 @@ class ConnectionManager:
                                         "lastPrice": float(data["c"]),
                                         "priceChange": float(data["p"]),
                                         "priceChangePercent": float(data["P"]),
+                                        "highPrice": float(data.get("h", 0)),
+                                        "lowPrice": float(data.get("l", 0)),
+                                        "volume": float(data.get("v", 0)),
+                                        "quoteVolume": float(data.get("q", 0)),
+                                        "openPrice": float(data.get("o", 0)),
                                     }
                                 }
                                 try:
@@ -407,6 +412,11 @@ class ConnectionManager:
                                         "lastPrice": float(item["c"]),
                                         "priceChange": float(item["p"]),
                                         "priceChangePercent": float(item["P"]),
+                                        "highPrice": float(item.get("h", 0)),
+                                        "lowPrice": float(item.get("l", 0)),
+                                        "volume": float(item.get("v", 0)),
+                                        "quoteVolume": float(item.get("q", 0)),
+                                        "openPrice": float(item.get("o", 0)),
                                     }
                             if updates:
                                 try:

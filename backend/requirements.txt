@@ -4,8 +4,6 @@ sqlalchemy
 pymysql
 python-dotenv
 requests
-tweepy
-beautifulsoup4
 langchain
 langchain-openai
 websockets

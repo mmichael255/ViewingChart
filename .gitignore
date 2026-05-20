@@ -15,7 +15,7 @@ scripts/
 
 # Local docs
 docs/
-
+.hermes/
 # Env files
 .env
 .env.bak

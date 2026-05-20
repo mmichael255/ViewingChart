@@ -58,8 +58,9 @@ class Settings:
     ALPHA_VANTAGE_BASE_URL = os.getenv("ALPHA_VANTAGE_BASE_URL", "https://www.alphavantage.co/query")
     YAHOO_SEARCH_URL = os.getenv("YAHOO_SEARCH_URL", "https://query2.finance.yahoo.com/v1/finance/search")
     YAHOO_TRENDING_URL = os.getenv("YAHOO_TRENDING_URL", "https://query2.finance.yahoo.com/v1/finance/trending/US")
-    ITICK_API_URL = os.getenv("ITICK_API_URL", "https://api.itick.org")
-    ITICK_API_TOKEN = os.getenv("ITICK_API_TOKEN", "")
+
+    # ── CoinGecko (crypto fundamentals — free, no API key needed) ──
+    COINGECKO_BASE_URL = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3")
 
     # ── Database ──
     DB_USER = os.getenv("DB_USER", "root")
@@ -106,9 +107,6 @@ def validate_secrets():
     if not settings.OPENAI_API_KEY:
         warnings.append("OPENAI_API_KEY is not set. Chat will run in mock mode.")
 
-    if not settings.ITICK_API_TOKEN:
-        warnings.append("ITICK_API_TOKEN is not set.")
-
     if settings.DB_PASSWORD in ("", "test123"):
         warnings.append("DB_PASSWORD is empty or default. Use a strong password in production.")
 
@@ -124,7 +122,6 @@ def validate_secrets():
     redis_auth = "auth enabled" if settings.REDIS_PASSWORD else "no password"
     logger.info(f"[CONFIG] Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT} ({redis_auth})")
     logger.info(f"[CONFIG] AlphaVantage key: {mask_secret(settings.ALPHA_VANTAGE_API_KEY)}")
-    logger.info(f"[CONFIG] iTick token: {mask_secret(settings.ITICK_API_TOKEN)}")
     logger.info(f"[CONFIG] JWT secret: {mask_secret(settings.JWT_SECRET)}")
 
 

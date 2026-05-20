@@ -214,8 +214,12 @@ def load_klines_from_db(
     asset_type: str,
     bar_interval: str,
     limit: int,
+    start_time: int | None = None,
 ) -> list[dict]:
-    """Most recent `limit` candles, ascending by time (chart order)."""
+    """Most recent `limit` candles from `start_time` onward, ascending by time (chart order).
+
+    If start_time is provided, only candles with open_time >= start_time are returned.
+    """
     sym = (
         db.query(Symbol)
         .filter(Symbol.symbol == symbol, Symbol.asset_type == asset_type)
@@ -226,9 +230,10 @@ def load_klines_from_db(
     q = (
         db.query(Kline)
         .filter(Kline.symbol_id == sym.id, Kline.bar_interval == bar_interval)
-        .order_by(Kline.open_time.desc())
-        .limit(limit)
     )
+    if start_time is not None:
+        q = q.filter(Kline.open_time >= start_time)
+    q = q.order_by(Kline.open_time.desc()).limit(limit)
     rows = list(q.all())
     if not rows:
         return []
@@ -242,6 +247,7 @@ def _sync_backfill_and_read(
     bar_interval: str,
     limit: int,
     api_data: list[dict],
+    start_time: int | None = None,
 ) -> list[dict]:
     db = SessionLocal()
     try:
@@ -253,8 +259,17 @@ def _sync_backfill_and_read(
         )
         if not sym:
             return api_data
+        # Delete stale bars before saving fresh backfill data. The scheduler
+        # may have stored bars at different time boundaries (e.g. raw 1h bars
+        # mislabeled as "4h" before the aggregation fix), inflating the count
+        # and pushing valid bars outside the LIMIT window on read-back.
+        db.query(Kline).filter(
+            Kline.symbol_id == sym.id,
+            Kline.bar_interval == bar_interval,
+        ).delete(synchronize_session=False)
+        db.commit()
         save_klines(db, sym.id, bar_interval, api_data)
-        return load_klines_from_db(db, symbol, asset_type, bar_interval, limit) or api_data
+        return load_klines_from_db(db, symbol, asset_type, bar_interval, limit, start_time) or api_data
     except Exception as e:
         logger.exception("klines DB backfill failed: %s", e)
         return api_data
@@ -263,11 +278,11 @@ def _sync_backfill_and_read(
 
 
 def _sync_read_only(
-    symbol: str, asset_type: str, bar_interval: str, limit: int
+    symbol: str, asset_type: str, bar_interval: str, limit: int, start_time: int | None = None
 ) -> list[dict]:
     db = SessionLocal()
     try:
-        return load_klines_from_db(db, symbol, asset_type, bar_interval, limit)
+        return load_klines_from_db(db, symbol, asset_type, bar_interval, limit, start_time)
     finally:
         db.close()
 
@@ -331,7 +346,8 @@ async def fetch_klines_from_api(
 ) -> list[dict]:
     if use_stock_kline_api(symbol, asset_type):
         return await stock_service.get_klines(
-            symbol, interval=bar_interval, limit=limit, include_extended=include_extended
+            symbol, interval=bar_interval, limit=limit,
+            include_extended=include_extended, start_time=start_time,
         )
     return await binance_service.get_klines(
         symbol,
@@ -348,6 +364,7 @@ async def get_klines_db_first(
     asset_type: str,
     limit: int = 5000,
     include_extended: bool = False,
+    start_time: int | None = None,
 ) -> list[dict] | None:
     """
     Read klines from DB. If none exist, backfill from API.
@@ -356,13 +373,16 @@ async def get_klines_db_first(
     to wall clock and interval length, fetch enough history to bridge the gap (capped
     at MAX_GAP_FILL_BARS); otherwise fetch a short tail only. Merged bars are upserted.
 
+    If start_time is provided, only candles with open_time >= start_time are returned
+    from DB, and the same start_time is forwarded to the upstream API.
+
     A short-lived Redis response cache avoids re-hitting the Binance API on page
     refreshes. The WS keeps the chart up-to-date regardless.
     """
     t0 = time.monotonic()
 
     # ── Response cache: instant return for repeated requests ──
-    cache_key = f"klines:resp:{symbol}:{bar_interval}:{asset_type}:ext:{1 if include_extended else 0}"
+    cache_key = f"klines:resp:{symbol}:{bar_interval}:{asset_type}:ext:{1 if include_extended else 0}:st:{start_time if start_time is not None else 'any'}"
     try:
         r = get_redis()
         cached_resp = await r.get(cache_key)
@@ -377,52 +397,74 @@ async def get_klines_db_first(
         pass
 
     cached = await asyncio.to_thread(
-        _sync_read_only, symbol, asset_type, bar_interval, limit
+        _sync_read_only, symbol, asset_type, bar_interval, limit * 2, start_time
     )
     t_db = time.monotonic()
 
     if cached:
-        api_tail: list[dict] = []
-        newest_db_t = _to_unix_seconds(cached[-1]["time"])
-        fetch_n = _gap_aware_api_fetch_limit(bar_interval, newest_db_t)
-        if fetch_n > TAIL_API_LIMIT:
-            logger.info(
-                "klines gap fill %s %s @ %s: fetching %d API bars (DB newest open_time=%s)",
-                symbol, asset_type, bar_interval, fetch_n, newest_db_t,
-            )
-        try:
-            api_tail = await asyncio.wait_for(
-                fetch_klines_from_api(symbol, asset_type, bar_interval, limit=fetch_n, include_extended=include_extended),
-                timeout=_TAIL_FETCH_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "klines %s %s @ %s → API tail timed out after %.1fs, returning DB data",
-                symbol, asset_type, bar_interval, _TAIL_FETCH_TIMEOUT,
-            )
-        except Exception as e:
-            logger.debug("API tail fetch failed (non-fatal): %s", e)
+        # DB has enough bars — tail-fill the most recent for freshness.
+        if len(cached) >= limit:
+            # Check if the data actually covers start_time. The DB might have
+            # been populated by the scheduler with a shorter history, leaving
+            # the earliest bars well after start_time.
+            db_first_ts = _to_unix_seconds(cached[0]["time"])
+            range_ok = start_time is None or db_first_ts <= start_time + 86400 * 14
+            if not range_ok:
+                logger.info(
+                    "klines short range %s %s @ %s: DB starts at %d but start_time=%d, falling through to backfill",
+                    symbol, asset_type, bar_interval, db_first_ts, start_time,
+                )
+            else:
+                api_tail: list[dict] = []
+                newest_db_t = _to_unix_seconds(cached[-1]["time"])
+                fetch_n = _gap_aware_api_fetch_limit(bar_interval, newest_db_t)
+                if fetch_n > TAIL_API_LIMIT:
+                    logger.info(
+                        "klines gap fill %s %s @ %s: fetching %d API bars (DB newest open_time=%s)",
+                        symbol, asset_type, bar_interval, fetch_n, newest_db_t,
+                    )
+                try:
+                    api_tail = await asyncio.wait_for(
+                        fetch_klines_from_api(symbol, asset_type, bar_interval, limit=fetch_n, include_extended=include_extended),
+                        timeout=_TAIL_FETCH_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "klines %s %s @ %s → API tail timed out after %.1fs, returning DB data",
+                        symbol, asset_type, bar_interval, _TAIL_FETCH_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.debug("API tail fetch failed (non-fatal): %s", e)
 
-        merged = merge_db_with_api_tail(cached, api_tail, limit)
+                merged = merge_db_with_api_tail(cached, api_tail, limit)
 
+                logger.info(
+                    "klines %s %s @ %s → DB %.0fms + API %.0fms = %.0fms (%d candles, tail=%d)",
+                    symbol, asset_type, bar_interval,
+                    (t_db - t0) * 1000,
+                    (time.monotonic() - t_db) * 1000,
+                    (time.monotonic() - t0) * 1000,
+                    len(merged), len(api_tail),
+                )
+
+                # Cache merged result and persist tail in the background
+                asyncio.create_task(_cache_and_persist(
+                    cache_key, merged, symbol, asset_type, bar_interval, api_tail,
+                ))
+                return merged
+
+        # DB has fewer bars than limit (e.g., a previous request with smaller
+        # limit populated the DB, but now a larger limit is requested).
+        # Fall through to full backfill.
         logger.info(
-            "klines %s %s @ %s → DB %.0fms + API %.0fms = %.0fms (%d candles, tail=%d)",
-            symbol, asset_type, bar_interval,
-            (t_db - t0) * 1000,
-            (time.monotonic() - t_db) * 1000,
-            (time.monotonic() - t0) * 1000,
-            len(merged), len(api_tail),
+            "klines partial DB %s %s @ %s: DB has %d bars but limit=%d, falling through to backfill",
+            symbol, asset_type, bar_interval, len(cached), limit,
         )
 
-        # Cache merged result and persist tail in the background
-        asyncio.create_task(_cache_and_persist(
-            cache_key, merged, symbol, asset_type, bar_interval, api_tail,
-        ))
-        return merged
-
-    # DB empty — full backfill from API (no timeout, this needs to complete)
+    # DB empty or has fewer bars than requested — full backfill from API (no timeout)
     api_data = await fetch_klines_from_api(
-        symbol, asset_type, bar_interval, limit=limit, include_extended=include_extended
+        symbol, asset_type, bar_interval, limit=max(limit, 1000), include_extended=include_extended,
+        start_time=start_time,
     )
     if not api_data:
         return None
@@ -433,7 +475,7 @@ async def get_klines_db_first(
         (time.monotonic() - t0) * 1000,
     )
     result = await asyncio.to_thread(
-        _sync_backfill_and_read, symbol, asset_type, bar_interval, limit, api_data,
+        _sync_backfill_and_read, symbol, asset_type, bar_interval, limit, api_data, start_time,
     )
 
     # Cache the backfill result too

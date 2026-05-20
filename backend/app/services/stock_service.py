@@ -95,8 +95,8 @@ class StockService:
             parts = sym.split("/")
             return "FX", parts[0], parts[1]
 
-        if sym == "XAUUSD" or sym == "XAGUSD":
-            return "FX", sym[:3], sym[3:]
+        if sym.startswith(("XAU", "XAG")):
+            return "FX", sym[:3], sym[3:6]
 
         # Default fallback, assume it's like EURUSD
         if len(sym) == 6:
@@ -262,6 +262,21 @@ class StockService:
             "baselinePrice": raw.get("baselinePrice"),
             "asOf": raw.get("asOf"),
             "isStale": bool(raw.get("isStale", False)),
+            # Fundamental fields from yfinance .info
+            "marketCap": raw.get("marketCap"),
+            "enterpriseValue": raw.get("enterpriseValue"),
+            "fiftyTwoWeekHigh": raw.get("fiftyTwoWeekHigh"),
+            "fiftyTwoWeekLow": raw.get("fiftyTwoWeekLow"),
+            "dayHigh": raw.get("dayHigh"),
+            "dayLow": raw.get("dayLow"),
+            "volume": raw.get("volume"),
+            "avgVolume": raw.get("avgVolume"),
+            "open": raw.get("open"),
+            "sharesOutstanding": raw.get("sharesOutstanding"),
+            "floatShares": raw.get("floatShares"),
+            "startDate": raw.get("startDate"),
+            "sector": raw.get("sector"),
+            "industry": raw.get("industry"),
         }
 
     @staticmethod
@@ -362,7 +377,7 @@ class StockService:
 
         return aggregated
 
-    async def _get_yf_klines(self, symbol: str, interval: str, limit: int = 1000, include_extended: bool = False) -> List[Dict[str, Any]]:
+    async def _get_yf_klines(self, symbol: str, interval: str, limit: int = 1000, include_extended: bool = False, start_time: int | None = None) -> List[Dict[str, Any]]:
         yf_interval = self._map_yf_interval(interval)
         needs_aggregation = interval == "4h"
         tz_et = ZoneInfo("America/New_York")
@@ -374,11 +389,18 @@ class StockService:
         elif yf_interval in ["2m", "5m", "15m", "30m", "60m", "90m", "1h"]:
             period = "60d"
 
+        # Build yfinance kwargs, adding start= if start_time is provided
+        history_kwargs = {"period": period, "interval": yf_interval, "prepost": include_extended}
+        if start_time is not None:
+            start_dt = datetime.fromtimestamp(start_time, tz=ZoneInfo("UTC"))
+            history_kwargs["start"] = start_dt
+            # When start is explicit, don't also set period (yfinance would error)
+            del history_kwargs["period"]
+
         # Fetch data asynchronously using thread pool since yfinance is blocking
         def fetch_yf():
             ticker = yf.Ticker(symbol)
-            # prepost only affects intraday bars.
-            return ticker.history(period=period, interval=yf_interval, prepost=include_extended)
+            return ticker.history(**history_kwargs)
 
         try:
             df = await asyncio.to_thread(fetch_yf)
@@ -410,7 +432,9 @@ class StockService:
         if needs_aggregation:
             formatted_data = self._aggregate_candles_by_day(formatted_data, 4, tz_et)
 
-        # Return only the requested limit
+        # Return only the requested limit, after optional start_time filter
+        if start_time is not None:
+            formatted_data = [c for c in formatted_data if c["time"] >= start_time]
         return formatted_data[-limit:]
 
     async def _get_av_klines(self, symbol: str, interval: str, limit: int = 1000, include_extended: bool = False) -> List[Dict[str, Any]]:
@@ -497,13 +521,14 @@ class StockService:
         interval: str = "4h",
         limit: int = 1000,
         include_extended: bool = False,
+        start_time: int | None = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch historical kline data with Redis caching (Fix #2.2).
         Routes to yfinance or Alpha Vantage.
         """
         # ── Check Redis cache first (Fix #2.2) ──
-        cache_key = f"klines:stock:{symbol}:{interval}:{limit}:ext:{1 if include_extended else 0}"
+        cache_key = f"klines:stock:{symbol}:{interval}:{limit}:ext:{1 if include_extended else 0}:st:{start_time or 'any'}"
         try:
             cached = await self.redis_client.get(cache_key)
             if cached:
@@ -514,7 +539,7 @@ class StockService:
         if self._is_alphavantage_symbol(symbol):
              data = await self._get_av_klines(symbol, interval, limit, include_extended=include_extended)
         else:
-             data = await self._get_yf_klines(symbol, interval, limit, include_extended=include_extended)
+             data = await self._get_yf_klines(symbol, interval, limit, include_extended=include_extended, start_time=start_time)
 
         # ── Cache with interval-aware TTL (Fix #2.2) ──
         if data:
@@ -526,6 +551,58 @@ class StockService:
                 logger.debug(f"Redis setex failed ({cache_key}): {e}")
 
         return data
+
+    async def get_fx_daily_enrichment(self, symbol: str) -> Dict[str, Any] | None:
+        """Fetch FX daily data from Alpha Vantage for precious metals (XAU, XAG).
+
+        Returns previousClose, dayHigh, dayLow, dayOpen from the most recent
+        daily bar, or None on failure.
+        """
+        if not self.alphavantage_api_key:
+            return None
+        ftype, from_sym, to_sym = self._format_alphavantage_symbol(symbol)
+        cache_key = f"fx:daily:{from_sym}{to_sym}"
+        try:
+            cached = await self.redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+        params = {
+            "function": "FX_DAILY",
+            "from_symbol": from_sym,
+            "to_symbol": to_sym,
+            "apikey": self.alphavantage_api_key,
+            "outputsize": "compact",
+        }
+        try:
+            data = await self._fetch_json(self.alphavantage_base_url, params=params)
+            series = data.get("Time Series FX (Daily)", {})
+            if not series:
+                return None
+
+            # Sort dates descending; latest is the most current daily bar
+            dates = sorted(series.keys(), reverse=True)
+            if len(dates) < 1:
+                return None
+
+            latest = series[dates[0]]
+            enriched = {
+                "previousClose": float(latest["4. close"]),
+                "dayHigh": float(latest["2. high"]),
+                "dayLow": float(latest["3. low"]),
+                "dayOpen": float(latest["1. open"]),
+            }
+            # Cache for 1 hour to stay within 25 req/day free tier
+            try:
+                await self.redis_client.setex(cache_key, 3600, json.dumps(enriched))
+            except Exception:
+                pass
+            return enriched
+        except Exception as e:
+            logger.warning(f"FX daily enrichment failed for {symbol}: {e}")
+            return None
 
     async def get_quote(self, symbol: str) -> Dict[str, Any]:
         """
@@ -662,7 +739,7 @@ class StockService:
                         ):
                             overnight_market_price = post_market_price
 
-                    return self._quote_from_prices(
+                    quote = self._quote_from_prices(
                         session=session,
                         regular_price=regular_price,
                         prev_close=prev_close,
@@ -671,6 +748,24 @@ class StockService:
                         overnight_market_price=overnight_market_price,
                         as_of=as_of,
                     )
+                    # Enrich with fundamental info from yfinance .info
+                    info = load_info()
+                    quote["marketCap"] = info.get("marketCap")
+                    quote["enterpriseValue"] = info.get("enterpriseValue")
+                    quote["fiftyTwoWeekHigh"] = info.get("fiftyTwoWeekHigh")
+                    quote["fiftyTwoWeekLow"] = info.get("fiftyTwoWeekLow")
+                    quote["dayHigh"] = info.get("dayHigh")
+                    quote["dayLow"] = info.get("dayLow")
+                    quote["volume"] = info.get("volume")
+                    quote["avgVolume"] = info.get("averageVolume")
+                    quote["open"] = info.get("open")
+                    quote["previousClose"] = info.get("previousClose") or quote.get("previousClose")
+                    quote["sharesOutstanding"] = info.get("sharesOutstanding")
+                    quote["floatShares"] = info.get("floatShares")
+                    quote["startDate"] = info.get("ipoDate") or info.get("firstTradeDateEpochUtc")
+                    quote["sector"] = info.get("sector")
+                    quote["industry"] = info.get("industry")
+                    return self._normalize_quote(quote)
                 except httpx.ReadTimeout:
                     self._record_stat("upstream_failure_timeout")
                     logger.error(f"yfinance Quote timeout for {symbol}")

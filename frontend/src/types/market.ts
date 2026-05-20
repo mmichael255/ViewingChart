@@ -24,6 +24,37 @@ export interface TickerData {
     baselinePrice?: number;
     asOf?: number;
     isStale?: boolean;
+    // Price range fields (from Binance enriched ticker)
+    highPrice?: number;
+    lowPrice?: number;
+    volume?: number;
+    quoteVolume?: number;
+    openPrice?: number;
+    // Fundamental fields (crypto via CoinGecko, stocks via yfinance)
+    marketCap?: number;
+    enterpriseValue?: number;
+    fullyDilutedValuation?: number;
+    fiftyTwoWeekHigh?: number;
+    fiftyTwoWeekLow?: number;
+    dayHigh?: number;
+    dayLow?: number;
+    avgVolume?: number;
+    sharesOutstanding?: number;
+    floatShares?: number;
+    circulatingSupply?: number;
+    totalSupply?: number;
+    maxSupply?: number;
+    ath?: number;
+    atl?: number;
+    genesisDate?: string;
+    startDate?: string | number;
+    marketCapRank?: number;
+    sector?: string;
+    industry?: string;
+    // CoinGecko fields
+    totalVolume?: number;
+    high24h?: number;
+    low24h?: number;
 }
 
 export interface WatchlistItem {

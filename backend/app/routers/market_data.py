@@ -8,6 +8,7 @@ from slowapi import Limiter
 from app.rate_limit_key import rate_limit_client_ip
 from app.services.binance_service import binance_service
 from app.services.stock_service import stock_service
+from app.services.coingecko_provider import coingecko_provider, FUTURES_ENRICHMENT_CONFIG
 from app.services.klines_db_service import get_klines_db_first
 from app.services.websocket_manager import manager
 from app.config import VALID_INTERVALS, VALID_ASSET_TYPES, SYMBOL_PATTERN, MAX_SYMBOLS_PER_REQUEST, MAX_SEARCH_QUERY_LENGTH
@@ -56,6 +57,22 @@ def validate_asset_type(asset_type: str) -> str:
             detail=f"Invalid asset_type '{asset_type}'. Must be one of: {', '.join(sorted(VALID_ASSET_TYPES))}"
         )
     return asset_type
+
+
+def validate_start_time(start_time: int | None) -> int | None:
+    """Validate start_time is a non-negative Unix timestamp within MySQL INT range."""
+    if start_time is not None:
+        if start_time < 0:
+            raise HTTPException(
+                status_code=422,
+                detail="start_time must be a non-negative Unix timestamp (seconds).",
+            )
+        if start_time > 2_147_483_647:
+            raise HTTPException(
+                status_code=422,
+                detail="start_time exceeds MySQL INT_MAX (2,147,483,647).",
+            )
+    return start_time
 
 
 def parse_symbol_list(raw: str) -> list[str]:
@@ -242,7 +259,7 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str, interval: str):
 # ── REST endpoints ──
 
 @router.get("/klines/{symbol}")
-@limiter.limit("30/minute")
+@limiter.limit("60/minute")
 async def get_klines(
     request: Request,
     symbol: str,
@@ -252,11 +269,22 @@ async def get_klines(
         default=False,
         description="Include pre/post market candles when supported by upstream",
     ),
+    start_time: int | None = Query(
+        default=None,
+        description="Unix timestamp (seconds) — return candles from this time onward",
+    ),
+    limit: int = Query(
+        default=5000,
+        ge=1,
+        le=10000,
+        description="Maximum number of candles to return",
+    ),
 ):
     """Get historical k-lines for a symbol."""
     symbol = validate_symbol(symbol)
     interval = validate_interval(interval)
     asset_type = validate_asset_type(asset_type)
+    start_time = validate_start_time(start_time)
 
     if asset_type == "stock":
         include_extended = False
@@ -265,8 +293,9 @@ async def get_klines(
         symbol,
         bar_interval=interval,
         asset_type=asset_type,
-        limit=5000,
+        limit=limit,
         include_extended=include_extended,
+        start_time=start_time,
     )
 
     if not data:
@@ -297,6 +326,28 @@ async def get_tickers(
     if s_list:
         s_data = await stock_service.get_quotes(s_list, use_cache=not force_refresh)
         results.update(s_data)
+
+    # Enrich futures-only symbols via FUTURES_ENRICHMENT_CONFIG.
+    # Each symbol maps to an enrichment source.
+    # Run all fetches in parallel via asyncio.gather.
+    enrich_tasks = []
+    enrich_symbols = []
+    for sym in list(results.keys()):
+        source = FUTURES_ENRICHMENT_CONFIG.get(sym)
+        if source == "coingecko":
+            enrich_tasks.append(coingecko_provider.get_coin_data(sym))
+            enrich_symbols.append(sym)
+        elif source == "alphavantage_fx" and stock_service.alphavantage_api_key:
+            enrich_tasks.append(stock_service.get_fx_daily_enrichment(sym))
+            enrich_symbols.append(sym)
+
+    if enrich_tasks:
+        enrich_results = await asyncio.gather(*enrich_tasks, return_exceptions=True)
+        for sym, data in zip(enrich_symbols, enrich_results):
+            if isinstance(data, dict):
+                for key, val in data.items():
+                    if val is not None:
+                        results[sym][key] = val
 
     return results
 

@@ -1,19 +1,12 @@
 "use client";
 
-import { ChartComponent } from '@/components/ChartComponent';
-import { PriceHighlight } from '@/components/Highlighting';
-import { IndicatorBar, IndicatorConfig, type IndicatorBarHandle } from '@/components/IndicatorBar';
-import { BottomIntervalBar } from '@/components/BottomIntervalBar';
-import { useMarketData } from '@/hooks/useMarketData';
-import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
-import type { CandlestickData, Time } from 'lightweight-charts';
+import { SymbolOverview } from '@/components/SymbolOverview';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import type { KlineData, TickerData } from '@/types/market';
 import { WatchlistSidebar } from '@/components/WatchlistSidebar';
 import { SymbolSearch } from '@/components/SymbolSearch'; // New
-import type { DrawingToolType } from '@/drawing';
 import Link from 'next/link';
 import { API_URL } from '@/config';
-import { buildPrePostSegments } from '@/lib/prepost';
 import { getAccessToken } from '@/lib/auth';
 import { fetchJson } from '@/lib/api';
 import type { WatchlistSummary } from '@/components/WatchlistSidebar';
@@ -22,11 +15,10 @@ import { UserMenu } from '@/components/UserMenu';
 import { MacroBar } from '@/components/MacroBar';
 import { AgentPanel } from '@/components/AgentPanel';
 import { NewsFeed } from '@/components/NewsFeed';
-import { formatCountdownMs, useCountdownMs } from '@/hooks/useCountdown';
 import { useResizable } from '@/hooks/useResizable';
-import { ResizeHandle } from '@/components/ResizeHandle';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { KeyboardShortcutsHelp } from '@/components/KeyboardShortcutsHelp';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 const INITIAL_CRYPTO_WATCHLIST = [
   { sym: 'BTCUSDT', label: 'BTC', sub: 'Bitcoin', source: 'Binance' },
@@ -54,37 +46,6 @@ type ApiWatchlistItem = {
   sub?: string | null;
 };
 
-const sessionLabel: Record<string, string> = {
-  pre: 'Pre',
-  regular: 'Regular',
-  post: 'Post',
-  overnight: 'Overnight',
-  closed: 'Closed',
-};
-
-const INTERVAL_SECONDS: Record<string, number> = {
-  '1m': 60,
-  '3m': 180,
-  '5m': 300,
-  '15m': 900,
-  '30m': 1800,
-  '1h': 3600,
-  '4h': 14400,
-  '1d': 86400,
-  '1w': 604800,
-  '1M': 30 * 86400,
-};
-
-function formatEtTime(ts?: number): string {
-  if (!ts) return '';
-  return new Date(ts * 1000).toLocaleTimeString('en-US', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'America/New_York',
-  });
-}
-
 export default function Home() {
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [chartInterval, setChartInterval] = useState('1d');
@@ -106,9 +67,7 @@ export default function Home() {
   // setState here.
   const [watchlistTicker, setWatchlistTicker] = useState<TickerData | undefined>(undefined);
   const [extraTickerBySymbol, setExtraTickerBySymbol] = useState<Record<string, TickerData>>({});
-
-  // Drawing Tools State
-  const [activeTool, setActiveTool] = useState<DrawingToolType>('crosshair');
+  const [enrichedTickerBySymbol, setEnrichedTickerBySymbol] = useState<Record<string, TickerData>>({});
 
   // Sidebar resize + collapse
   const { size: sidebarWidth, isDragging: isSidebarDragging, handleProps: sidebarHandleProps } = useResizable({
@@ -120,81 +79,47 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
 
-  // Indicators State
-  const [activeIndicators, setActiveIndicators] = useState<IndicatorConfig[]>([
-    { id: 'ma', type: 'overlay', name: 'MA', params: { periods: [7, 25, 99] } },
-    { id: 'volume', type: 'oscillator', name: 'VOLUME', params: {} }
+  // (unused chart state removed — chart lives at /chart now)
+
+  // MiniChart klines — lifted up from MiniChart to share with QuickTechnicals
+  const [miniChartKlines, setMiniChartKlines] = useState<KlineData[] | undefined>(undefined);
+
+  // Fields that the enriched REST ticker (CoinGecko / Alpha Vantage) should
+  // contribute — never override the live WS price/change values from watchlistTicker.
+  const ENRICHMENT_ONLY_KEYS = new Set([
+    "marketCap", "enterpriseValue", "fullyDilutedValuation",
+    "totalVolume", "high24h", "low24h",
+    "circulatingSupply", "totalSupply", "maxSupply",
+    "ath", "atl", "genesisDate", "marketCapRank",
+    "previousClose", "dayHigh", "dayLow", "dayOpen",
+    "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
+    "avgVolume", "sharesOutstanding", "floatShares",
+    "sector", "industry", "startDate",
   ]);
 
-  // Quick Access Intervals
-  // Default: 15m, 1h, 4h, 1d, 1w
-  const [quickIntervals, setQuickIntervals] = useState(['15m', '1h', '4h', '1d', '1w']);
-  const [showAllIntervals, setShowAllIntervals] = useState(false);
-  const intervalDropdownRef = useRef<HTMLDivElement>(null);
-  const indicatorBarRef = useRef<IndicatorBarHandle>(null);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (intervalDropdownRef.current && !intervalDropdownRef.current.contains(event.target as Node)) {
-        setShowAllIntervals(false);
-      }
+  function pickEnrichment(t: TickerData): Partial<TickerData> {
+    const out: Record<string, unknown> = {};
+    for (const key of ENRICHMENT_ONLY_KEYS) {
+      if (key in t) out[key] = (t as unknown as Record<string, unknown>)[key];
     }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+    return out as Partial<TickerData>;
+  }
 
-  const { data, isLoading, wsStatus, lastStockRestSuccessAtMs, lastStockRestErrorAtMs, stockRefreshIntervalMs } = useMarketData(symbol, chartInterval, assetType);
   const extraTicker = extraTickerBySymbol[symbol];
-  const selectedTicker = watchlistTicker ?? extraTicker;
-
-  // Avoid calling Date.now() during render (lint: react-hooks/purity).
-  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    const id = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  const chartData = useMemo(() => {
-    if (!data || !Array.isArray(data) || data.length === 0) return data;
-    if (assetType !== 'stock') return data;
-    // Only "live-close" the forming candle during regular session.
-    if (selectedTicker?.session && selectedTicker.session !== 'regular') return data;
-    const lastPrice = selectedTicker?.lastPrice;
-    if (typeof lastPrice !== 'number' || !Number.isFinite(lastPrice)) return data;
-
-    const last = data[data.length - 1] as KlineData;
-    const tLast = Number(last.time);
-    const sec = INTERVAL_SECONDS[chartInterval] ?? 0;
-    if (!sec || !Number.isFinite(tLast)) return data;
-
-    // Only "live-close" the currently-forming bar.
-    if (nowSec < tLast || nowSec >= tLast + sec) return data;
-
-    const patchedLast: KlineData = {
-      ...last,
-      close: lastPrice,
-      high: Math.max(Number(last.high ?? lastPrice), lastPrice),
-      low: Math.min(Number(last.low ?? lastPrice), lastPrice),
-    };
-    const out = data.slice();
-    out[out.length - 1] = patchedLast;
-    return out;
-  }, [data, assetType, selectedTicker?.lastPrice, selectedTicker?.session, chartInterval, nowSec]);
+  const enrichedTicker = enrichedTickerBySymbol[symbol];
+  const selectedTicker = (() => {
+    const base = watchlistTicker ?? extraTicker;
+    if (enrichedTicker && base) {
+      // Only merge enrichment fields — don't let stale REST price/change
+      // overwrite live WS values from watchlistTicker.
+      return { ...base, ...pickEnrichment(enrichedTicker) };
+    }
+    return base ?? enrichedTicker;
+  })();
 
   const handleSelectedTickerChange = useCallback((ticker: TickerData | undefined) => {
     setWatchlistTicker(ticker);
   }, []);
-
-  const stockKlineNextAtMs =
-    assetType === 'stock' && lastStockRestSuccessAtMs
-      ? lastStockRestSuccessAtMs + (stockRefreshIntervalMs ?? 60_000)
-      : null;
-  const stockKlineRemainingMs = useCountdownMs(stockKlineNextAtMs);
-  const stockKlineCountdown = stockKlineNextAtMs ? formatCountdownMs(stockKlineRemainingMs) : null;
-  const stockKlineHasError =
-    assetType === 'stock' &&
-    !!lastStockRestErrorAtMs &&
-    (!lastStockRestSuccessAtMs || lastStockRestErrorAtMs > lastStockRestSuccessAtMs);
 
   /** Stable reference for sidebar — avoids resetting edit order every parent render. */
   const sidebarOrderedItems = useMemo((): WatchlistItem[] | undefined => {
@@ -238,6 +163,32 @@ export default function Home() {
       controller.abort();
     };
   }, [assetType, symbol, watchlistTicker, extraTickerBySymbol]);
+
+  // Always fetch enriched REST ticker for the active symbol (needed for
+  // CoinGecko enrichment on crypto, or when watchlist WS doesn't have
+  // fundamental data). Runs regardless of assetType or watchlistTicker.
+  useEffect(() => {
+    if (!symbol) return;
+    const controller = new AbortController();
+    const paramName = assetType === 'crypto' ? 'crypto_symbols' : 'stock_symbols';
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_URL}/market/tickers?${paramName}=${encodeURIComponent(symbol)}`,
+          { signal: controller.signal },
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as Record<string, TickerData>;
+        const t = data?.[symbol];
+        if (t) setEnrichedTickerBySymbol((prev) => ({ ...prev, [symbol]: t }));
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+      }
+    })();
+    return () => {
+      controller.abort();
+    };
+  }, [symbol, assetType]);
 
   const [token, setToken] = useState<string | null>(() => getAccessToken());
   const [me, setMe] = useState<{ role?: string | null } | null>(null);
@@ -429,13 +380,13 @@ export default function Home() {
     });
   }
 
-  /** Same last bar as the chart / kline stream (REST + WS merged in useMarketData). */
+  /** Document title from MiniChart's last close (reuses MiniChart klines). */
   const lastClose = useMemo(() => {
-    if (!data?.length) return null;
-    const c = data[data.length - 1].close;
+    if (!miniChartKlines?.length) return null;
+    const c = miniChartKlines[miniChartKlines.length - 1].close;
     const n = typeof c === 'number' ? c : Number(c);
     return Number.isFinite(n) ? n : null;
-  }, [data]);
+  }, [miniChartKlines]);
 
   useEffect(() => {
     if (lastClose != null) {
@@ -466,39 +417,17 @@ export default function Home() {
 
   const handleIntervalChange = (newInterval: string) => {
     setChartInterval(newInterval);
-    setShowAllIntervals(false);
   };
 
   // Global keyboard shortcuts
   useKeyboardShortcuts({
     'Escape': () => {
       setSearchModalMode('closed');
-      setShowAllIntervals(false);
       setShowShortcutsHelp(false);
-      setActiveTool('crosshair');
-      indicatorBarRef.current?.closeAll();
     },
     '/': () => setSearchModalMode('search'),
     'Shift+/': () => setShowShortcutsHelp(v => !v),
     'Ctrl+b': () => setSidebarCollapsed(v => !v),
-    '1': () => setActiveTool('crosshair'),
-    '2': () => setActiveTool('trendline'),
-    '3': () => setActiveTool('horizontal_line'),
-    '4': () => setActiveTool('vertical_line'),
-    '5': () => setActiveTool('ray'),
-    '6': () => setActiveTool('parallel_channel'),
-    '7': () => setActiveTool('fib_retracement'),
-    '8': () => setActiveTool('rectangle'),
-    '9': () => setActiveTool('measure'),
-    'Ctrl+1': () => handleIntervalChange('1m'),
-    'Ctrl+2': () => handleIntervalChange('5m'),
-    'Ctrl+3': () => handleIntervalChange('15m'),
-    'Ctrl+4': () => handleIntervalChange('1h'),
-    'Ctrl+5': () => handleIntervalChange('4h'),
-    'Ctrl+6': () => handleIntervalChange('1d'),
-    'Ctrl+7': () => handleIntervalChange('1w'),
-    'Ctrl+8': () => handleIntervalChange('1M'),
-    'Ctrl+i': () => indicatorBarRef.current?.openModal(),
     'Ctrl+Shift+]': () => {
       const idx = flatWatchlist.findIndex(i => i.sym === symbol && i.type === assetType);
       if (idx >= 0 && idx < flatWatchlist.length - 1) {
@@ -514,56 +443,6 @@ export default function Home() {
       }
     },
   });
-
-  // --- Interval Interaction Logic ---
-  const handleQuickDragStart = (e: React.DragEvent, index: number) => {
-    e.dataTransfer.setData("text/plain", index.toString());
-    e.dataTransfer.effectAllowed = "move";
-  };
-
-  const handleQuickDrop = (e: React.DragEvent, targetIndex: number) => {
-    e.preventDefault();
-    const sourceIndexStr = e.dataTransfer.getData("text/plain");
-    const sourceIndex = parseInt(sourceIndexStr, 10);
-
-    if (!isNaN(sourceIndex) && sourceIndex !== targetIndex) {
-      const newItems = [...quickIntervals];
-      const [movedItem] = newItems.splice(sourceIndex, 1);
-      newItems.splice(targetIndex, 0, movedItem);
-      setQuickIntervals(newItems);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-  };
-
-  const toggleQuickAccess = (interval: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // prevent setting interval
-
-    const exists = quickIntervals.includes(interval);
-    if (exists) {
-      if (quickIntervals.length > 3) {
-        setQuickIntervals(prev => prev.filter(i => i !== interval));
-      }
-    } else {
-      if (quickIntervals.length < 5) {
-        setQuickIntervals(prev => [...prev, interval]);
-      }
-    }
-  };
-
-  const CRYPTO_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
-  // Stock candles always render RTH only (intraday is filtered upstream;
-  // daily+ is naturally RTH from yfinance). 4h is aggregated from 1h on the
-  // backend (`stock_service._aggregate_candles`).
-  const STOCK_INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M'];
-  const allIntervals = assetType === 'crypto' ? CRYPTO_INTERVALS : STOCK_INTERVALS;
-
-  const prePostSegments = useMemo(
-    () => (assetType === 'stock' ? buildPrePostSegments(selectedTicker) : []),
-    [assetType, selectedTicker],
-  );
 
   return (
     <div className="flex flex-col h-full min-h-screen bg-black text-[#E6EDF3] overflow-hidden">
@@ -600,212 +479,23 @@ export default function Home() {
       <MacroBar />
 
       {/* ── Body: 3-column layout ── */}
-      <div className="flex flex-1 overflow-hidden h-full p-1 relative">
+      <ErrorBoundary>
+        <div className="flex flex-1 overflow-hidden h-full p-1 relative">
         {/* ── Agent Panel (left) ── */}
         <AgentPanel />
 
-        {/* ── Main Chart Wrapper (center) ── */}
-        <main className="flex-1 flex h-full overflow-hidden relative border border-gray-800 bg-[#1E222D]">
-          {/* LEFT Drawing Toolbar */}
-          <div className="w-10 flex flex-col items-center border-r border-gray-800 bg-[#1E222D] py-2 gap-2 z-30 shrink-0">
-            <ToolIcon icon="✜" tooltip="Crosshair" isActive={activeTool === 'crosshair'} onClick={() => setActiveTool('crosshair')} />
-            <ToolIcon icon="／" tooltip="Trend Line" isActive={activeTool === 'trendline'} onClick={() => setActiveTool(activeTool === 'trendline' ? 'crosshair' : 'trendline')} />
-            <ToolIcon icon="—" tooltip="Horizontal Line" isActive={activeTool === 'horizontal_line'} onClick={() => setActiveTool(activeTool === 'horizontal_line' ? 'crosshair' : 'horizontal_line')} />
-            <ToolIcon icon="|" tooltip="Vertical Line" isActive={activeTool === 'vertical_line'} onClick={() => setActiveTool(activeTool === 'vertical_line' ? 'crosshair' : 'vertical_line')} />
-            <ToolIcon icon="↗" tooltip="Ray" isActive={activeTool === 'ray'} onClick={() => setActiveTool(activeTool === 'ray' ? 'crosshair' : 'ray')} />
-            <ToolIcon icon="⑃" tooltip="Parallel Channel" isActive={activeTool === 'parallel_channel'} onClick={() => setActiveTool(activeTool === 'parallel_channel' ? 'crosshair' : 'parallel_channel')} />
-            <ToolIcon icon="F" tooltip="Fib Retracement" isActive={activeTool === 'fib_retracement'} onClick={() => setActiveTool(activeTool === 'fib_retracement' ? 'crosshair' : 'fib_retracement')} />
-            <ToolIcon icon="⬜" tooltip="Rectangle" isActive={activeTool === 'rectangle'} onClick={() => setActiveTool(activeTool === 'rectangle' ? 'crosshair' : 'rectangle')} />
-            <ToolIcon icon="📏" tooltip="Measure" isActive={activeTool === 'measure'} onClick={() => setActiveTool(activeTool === 'measure' ? 'crosshair' : 'measure')} />
-            <div className="flex-1" />
-            <ToolIcon icon="🗑" tooltip="Remove Selected" onClick={() => {
-              window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete' }));
-            }} />
-          </div>
-
-          {/* Center Chart Column */}
-          <div className="flex-1 flex flex-col h-full min-w-0">
-            {/* Chart Toolbar */}
-            <div className="flex items-center gap-3 px-4 h-11 border-b border-gray-800 bg-[#1E222D] shrink-0 z-30">
-              <div className="flex items-center gap-2 mr-4 shrink-0 min-w-0">
-                <span className="text-sm font-bold text-white tracking-tight">{symbol}</span>
-                {lastClose != null && (
-                  <PriceHighlight price={lastClose} className="text-sm font-bold tabular-nums" />
-                )}
-                {prePostSegments.length > 0 && (
-                  <span className="text-[10px] tabular-nums flex items-center gap-2 shrink-0">
-                    {prePostSegments.map((seg) => (
-                      <span
-                        key={seg.kind}
-                        className={
-                          seg.isActiveSession
-                            ? 'text-blue-300 font-semibold'
-                            : 'text-gray-400'
-                        }
-                      >
-                        {seg.label} {seg.price.toFixed(2)}
-                      </span>
-                    ))}
-                  </span>
-                )}
-                {/* Show session badge only when it is NOT already implied by the
-                    Pre / Post / O/N highlight above. Always show during regular/closed. */}
-                {assetType === 'stock' && selectedTicker?.session && (
-                  selectedTicker.session === 'regular' || selectedTicker.session === 'closed' ||
-                  !prePostSegments.some((s) => s.isActiveSession)
-                ) && (
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-300 bg-blue-500/10 px-1.5 py-0.5 rounded">
-                    {sessionLabel[selectedTicker.session] ?? selectedTicker.session}
-                    {selectedTicker.asOf ? ` ${formatEtTime(selectedTicker.asOf)} ET` : ''}
-                  </span>
-                )}
-                {/* When the active session IS pre/post/overnight, replace the verbose
-                    badge with a compact ET-time chip — the colored extended-hours
-                    line above already conveys which session we're in. */}
-                {assetType === 'stock' && selectedTicker?.asOf &&
-                  (selectedTicker.session === 'pre' || selectedTicker.session === 'post' || selectedTicker.session === 'overnight') &&
-                  prePostSegments.some((s) => s.isActiveSession) && (
-                  <span className="text-[10px] text-gray-500 tabular-nums">
-                    {formatEtTime(selectedTicker.asOf)} ET
-                  </span>
-                )}
-                {selectedTicker?.isStale && (
-                  <span className="text-[9px] font-semibold uppercase tracking-wider text-yellow-300 bg-yellow-500/10 px-1.5 py-0.5 rounded">
-                    Stale
-                  </span>
-                )}
-                {wsStatus !== 'connected' && (
-                  <span
-                    title={wsStatus === 'reconnecting' ? 'Reconnecting to live data...' : 'Live data disconnected'}
-                    className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                      wsStatus === 'reconnecting'
-                        ? 'bg-yellow-500/15 text-yellow-400 animate-pulse'
-                        : 'bg-red-500/15 text-red-400'
-                    }`}
-                  >
-                    {wsStatus === 'reconnecting' ? 'Reconnecting' : 'Offline'}
-                  </span>
-                )}
-                {assetType === 'stock' && stockKlineCountdown && (
-                  <span
-                    title="Next REST kline refresh"
-                    className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-800/50 text-gray-300"
-                  >
-                    Fetch in <span className="tabular-nums">{stockKlineCountdown}</span>
-                  </span>
-                )}
-                {stockKlineHasError && (
-                  <span
-                    title="Last stock kline fetch failed"
-                    className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300"
-                  >
-                    Kline fetch failed
-                  </span>
-                )}
-              </div>
-              <div className="w-px h-5 bg-gray-700 mx-1" />
-
-              {/* Sortable Quick Access Interval Selector */}
-              <div className="flex items-center gap-1 relative">
-                {quickIntervals.map((int, index) => (
-                  <div
-                    key={int}
-                    draggable
-                    onDragStart={(e) => handleQuickDragStart(e, index)}
-                    onDrop={(e) => handleQuickDrop(e, index)}
-                    onDragOver={handleDragOver}
-                    className="cursor-move"
-                  >
-                    <button
-                      onClick={() => handleIntervalChange(int)}
-                      className={`px-2 py-1 rounded text-xs transition-colors whitespace-nowrap min-w-[2rem] text-center ${chartInterval === int ? 'bg-[#D1D5DB] text-black font-semibold' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
-                    >
-                      {int}
-                    </button>
-                  </div>
-                ))}
-
-                <div className="relative ml-1" ref={intervalDropdownRef}>
-                  <button
-                    onClick={() => setShowAllIntervals(!showAllIntervals)}
-                    className={`px-2 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-gray-700 transition-colors ${showAllIntervals ? 'bg-gray-700 text-white' : ''}`}
-                  >
-                    ⌄
-                  </button>
-
-                  {/* Dropdown Menu */}
-                  {showAllIntervals && (
-                    <div className="absolute top-full left-0 mt-1 bg-[#1E222D] border border-gray-700 rounded shadow-2xl p-2 grid grid-cols-1 gap-0.5 z-50 min-w-[120px] max-h-[300px] overflow-y-auto">
-                      {allIntervals.map(int => {
-                        const isInQuick = quickIntervals.includes(int);
-                        const canAdd = !isInQuick && quickIntervals.length < 5;
-                        const canRemove = isInQuick && quickIntervals.length > 3;
-
-                        return (
-                          <div
-                            key={int}
-                            className={`group flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer ${chartInterval === int ? 'bg-[#D1D5DB]/10' : ''}`}
-                            onClick={() => handleIntervalChange(int)}
-                          >
-                            <span className={`text-[11px] ${chartInterval === int ? 'text-[#D1D5DB] font-bold' : 'text-gray-300'}`}>{int}</span>
-
-                            {/* Add/Remove Action (Visible on Hover) */}
-                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center">
-                              {isInQuick && canRemove && (
-                                <button
-                                  onClick={(e) => toggleQuickAccess(int, e)}
-                                  className="text-sm font-bold text-gray-400 hover:text-red-400 hover:bg-red-400/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
-                                  title="Remove from favorites"
-                                >
-                                  ✕
-                                </button>
-                              )}
-                              {!isInQuick && canAdd && (
-                                <button
-                                  onClick={(e) => toggleQuickAccess(int, e)}
-                                  className="text-sm font-bold text-gray-400 hover:text-[#D1D5DB] hover:bg-[#D1D5DB]/10 cursor-pointer w-5 h-5 flex items-center justify-center rounded transition-colors"
-                                  title="Add to favorites"
-                                >
-                                  ＋
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="flex-1" />
-              <button className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors">📷</button>
-            </div>
-
-            {/* ── Macro Bar ── */}
-            <MacroBar />
-
-            {/* Chart Canvas Area */}
-            <div className="flex-1 flex flex-col relative bg-[#1E222D] overflow-hidden min-h-0">
-              {isLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-[#1E222D]/80 z-20 backdrop-blur-[1px]">
-                  <div className="w-8 h-8 border-2 border-[#D1D5DB] border-t-transparent rounded-full animate-spin" />
-                </div>
-              )}
-              <div className="flex-1 min-h-0 relative">
-                {chartData && <ChartComponent data={chartData as unknown as CandlestickData<Time>[]} symbol={symbol} indicators={activeIndicators} activeTool={activeTool} />}
-              </div>
-
-              {/* ── Bottom Stack ── */}
-              <div className="shrink-0 flex flex-col z-30 w-full bg-[#131722]">
-                <IndicatorBar ref={indicatorBarRef} activeIndicators={activeIndicators} onChange={setActiveIndicators} />
-                <BottomIntervalBar
-                  intervals={allIntervals}
-                  currentInterval={chartInterval}
-                  onIntervalChange={handleIntervalChange}
-                />
-              </div>
-            </div>
-          </div>
+        {/* ── Symbol Overview (center) ── */}
+        <main className="flex-1 flex h-full overflow-hidden relative bg-[#0D1117]">
+          <SymbolOverview
+            symbol={symbol}
+            assetType={assetType}
+            ticker={selectedTicker}
+            klines={miniChartKlines}
+            onOpenChart={() => {
+              window.open(`/chart?symbol=${encodeURIComponent(symbol)}`, "_self");
+            }}
+            onMiniChartData={setMiniChartKlines}
+          />
         </main>
 
         {!sidebarCollapsed && (
@@ -836,8 +526,8 @@ export default function Home() {
               symbol={symbol}
               assetType={assetType}
               chartInterval={chartInterval}
-              chartKlines={chartData}
-              chartKlinesLoading={isLoading}
+              chartKlines={miniChartKlines}
+              chartKlinesLoading={miniChartKlines === undefined}
               mergedTicker={selectedTicker}
               handleSymbolChange={handleSymbolChange}
               setSearchModalMode={setSearchModalMode}
@@ -855,6 +545,7 @@ export default function Home() {
           {sidebarCollapsed ? '◀' : '▶'}
         </button>
       </div>
+      </ErrorBoundary>
 
       {/* Unified Search Modal */}
       {searchModalMode !== 'closed' && (
@@ -942,13 +633,3 @@ export default function Home() {
     </div>
   );
 }
-
-const ToolIcon = ({ icon, tooltip, isActive, onClick }: { icon: string, tooltip: string, isActive?: boolean, onClick?: () => void }) => (
-  <button
-    title={tooltip}
-    onClick={onClick}
-    className={`w-7 h-7 flex items-center justify-center rounded transition-colors text-xs ${isActive ? 'text-[#D1D5DB] bg-[#D1D5DB]/10' : 'text-gray-400 hover:text-[#D1D5DB] hover:bg-[#D1D5DB]/10'}`}
-  >
-    {icon}
-  </button>
-);
